@@ -76,6 +76,7 @@ assert.strictEqual(typeof client.suspendCards, 'function');
 assert.strictEqual(typeof client.unsuspendCards, 'function');
 assert.strictEqual(typeof client.guiBrowse, 'function');
 assert.strictEqual(typeof client.storeMediaFile, 'function');
+assert.strictEqual(typeof client.retrieveMediaFile, 'function');
 assert.strictEqual(typeof client.getMediaFilesNames, 'function');
 assert.strictEqual(typeof client.sync, 'function');
 

@@ -13,6 +13,8 @@ export class DeckPlayer {
 	private currentIndex: number = 0;
 	private showingAnswer: boolean = false;
 	private isLoading: boolean = false;
+	private mediaCache = new Map<string, string | null>();
+	private loadRequestId = 0;
 
 	private sessionStats = {
 		again: 0,
@@ -88,8 +90,9 @@ export class DeckPlayer {
 	}
 
 	public async loadCards(): Promise<void> {
+		const requestId = ++this.loadRequestId;
 		if (this.config.select || (!this.config.deck && !this.config.query)) {
-			await this.renderDeckPicker();
+			await this.renderDeckPicker(requestId);
 			return;
 		}
 
@@ -104,7 +107,9 @@ export class DeckPlayer {
 			const cardIds = await this.client.findCards(query);
 
 			if (!cardIds || cardIds.length === 0) {
+				if (requestId !== this.loadRequestId) return;
 				this.cards = [];
+				this.isLoading = false;
 				this.renderEmpty();
 				return;
 			}
@@ -120,7 +125,15 @@ export class DeckPlayer {
 				selectedIds = selectedIds.slice(0, limit);
 			}
 
-			this.cards = await this.client.getCardsInfo(selectedIds);
+			const cards = await this.client.getCardsInfo(selectedIds);
+			const preparedCards = await Promise.all(cards.map(async card => ({
+				...card,
+				question: await this.resolveMediaHtml(card.question),
+				answer: await this.resolveMediaHtml(card.answer),
+			})));
+
+			if (requestId !== this.loadRequestId) return;
+			this.cards = preparedCards;
 			this.isLoading = false;
 
 			if (this.cards.length === 0) {
@@ -129,13 +142,14 @@ export class DeckPlayer {
 				this.renderCurrentCard();
 			}
 		} catch (err: unknown) {
+			if (requestId !== this.loadRequestId) return;
 			this.isLoading = false;
 			const msg = err instanceof Error ? err.message : String(err);
 			this.renderError(msg);
 		}
 	}
 
-	private async renderDeckPicker(): Promise<void> {
+	private async renderDeckPicker(requestId: number = this.loadRequestId): Promise<void> {
 		this.container.empty();
 		this.renderHeader('Select deck');
 
@@ -144,6 +158,7 @@ export class DeckPlayer {
 
 		try {
 			const decks = await this.client.getDeckNames();
+			if (requestId !== this.loadRequestId) return;
 			if (!decks || decks.length === 0) {
 				pickerDiv.createDiv({ cls: 'anki-embed-empty', text: 'No decks found in Anki.' });
 				return;
@@ -209,6 +224,7 @@ export class DeckPlayer {
 				}
 			};
 		} catch (err: unknown) {
+			if (requestId !== this.loadRequestId) return;
 			const msg = err instanceof Error ? err.message : String(err);
 			this.renderError(msg);
 		}
@@ -321,6 +337,78 @@ export class DeckPlayer {
 				this.renderError(msg);
 			}
 		}
+	}
+
+	private async resolveMediaHtml(html: string): Promise<string> {
+		if (!/<(?:img|source)\b/i.test(html)) return html;
+
+		const wrapper = createDiv();
+		wrapper.appendChild(sanitizeHTMLToDom(html));
+		const mediaElements = Array.from(wrapper.querySelectorAll('img[src], img[srcset], source[src], source[srcset]'));
+
+		await Promise.all(mediaElements.map(async element => {
+			const srcset = element.getAttribute('srcset');
+			const source = element.getAttribute('src')?.trim() ??
+				srcset?.split(',')[0]?.trim().split(/\s+/)[0];
+			if (!source || /^[a-z][a-z\d+.-]*:/i.test(source) || source.startsWith('//')) {
+				return;
+			}
+
+			let filename: string;
+				try {
+					const encodedFilename = source.split(/[?#]/, 1)[0];
+					if (!encodedFilename) return;
+					filename = decodeURIComponent(encodedFilename).replace(/^\.\/+/, '');
+				} catch {
+				return;
+			}
+
+			let mediaData = this.mediaCache.get(filename);
+			if (mediaData === undefined) {
+				try {
+					const result = await this.client.retrieveMediaFile(filename);
+					mediaData = result || null;
+				} catch {
+					mediaData = null;
+				}
+				this.mediaCache.set(filename, mediaData);
+			}
+
+			if (mediaData) {
+				const dataUrl = mediaData.startsWith('data:')
+					? mediaData
+					: `data:${this.getMediaMimeType(filename)};base64,${mediaData}`;
+				element.setAttribute('src', dataUrl);
+				element.removeAttribute('srcset');
+			} else {
+				const altText = element.getAttribute('alt');
+				if (altText) {
+					element.replaceWith(document.createTextNode(altText));
+				} else {
+					element.remove();
+				}
+			}
+		}));
+
+		return wrapper.innerHTML;
+	}
+
+	private getMediaMimeType(filename: string): string {
+		const extension = filename.split('.').pop()?.toLowerCase();
+		const mimeTypes: Record<string, string> = {
+			avif: 'image/avif',
+			bmp: 'image/bmp',
+			gif: 'image/gif',
+			jpeg: 'image/jpeg',
+			jpg: 'image/jpeg',
+			ico: 'image/x-icon',
+			png: 'image/png',
+			svg: 'image/svg+xml',
+			tif: 'image/tiff',
+			tiff: 'image/tiff',
+			webp: 'image/webp',
+		};
+		return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
 	}
 
 	private renderCurrentCard() {
