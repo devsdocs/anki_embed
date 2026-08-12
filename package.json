@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-anki-embed",
 	"version": "1.0.0",
-	"description": "Embed interactive Anki flashcard decks inside Obsidian notes via AnkiConnect.",
+	"description": "Embed interactive Anki flashcard decks inside notes via AnkiConnect.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
