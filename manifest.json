@@ -1,0 +1,10 @@
+{
+	"id": "anki-embed",
+	"name": "Anki Embed",
+	"version": "1.0.0",
+	"minAppVersion": "1.0.0",
+	"description": "Embed interactive Anki flashcard decks inside Obsidian notes via AnkiConnect.",
+	"author": "devsdocs",
+	"authorUrl": "https://github.com/devsdocs",
+	"isDesktopOnly": false
+}

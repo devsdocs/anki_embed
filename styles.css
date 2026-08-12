@@ -1,0 +1,242 @@
+/* Obsidian Anki Embed Styles */
+
+.anki-embed-container {
+	border: 1px solid var(--background-modifier-border);
+	background-color: var(--background-primary-alt);
+	border-radius: var(--radius-m, 8px);
+	padding: 16px;
+	margin: 12px 0;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+	font-family: var(--font-text);
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+	position: relative;
+	min-height: 220px;
+}
+
+.anki-embed-container:focus-within,
+.anki-embed-container:hover {
+	border-color: var(--interactive-accent);
+}
+
+/* Header */
+.anki-embed-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding-bottom: 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-size: 0.9em;
+}
+
+.anki-embed-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.anki-embed-badge {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent, #ffffff);
+	font-size: 0.75em;
+	padding: 2px 8px;
+	border-radius: 12px;
+	font-weight: 500;
+}
+
+.anki-embed-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.anki-embed-btn-icon {
+	background: transparent;
+	border: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	padding: 4px 8px;
+	border-radius: 4px;
+	font-size: 0.85em;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.anki-embed-btn-icon:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* Card Body */
+.anki-embed-card {
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s, 6px);
+	padding: 20px;
+	min-height: 140px;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	text-align: center;
+	font-size: 1.05em;
+	line-height: 1.6;
+	overflow-y: auto;
+	word-wrap: break-word;
+	hyphens: auto;
+}
+
+.anki-embed-card img {
+	max-width: 100%;
+	height: auto;
+	border-radius: 4px;
+	margin: 8px 0;
+}
+
+.anki-embed-card hr {
+	width: 80%;
+	border: 0;
+	height: 1px;
+	background: var(--background-modifier-border);
+	margin: 14px 0;
+}
+
+.anki-embed-cloze {
+	color: var(--interactive-accent);
+	font-weight: bold;
+}
+
+/* Question & Answer Sections */
+.anki-embed-question {
+	width: 100%;
+}
+
+.anki-embed-answer {
+	width: 100%;
+	margin-top: 12px;
+	animation: anki-fade-in 0.25s ease-in-out;
+}
+
+@keyframes anki-fade-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+/* Footer & Rating Buttons */
+.anki-embed-footer {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.anki-embed-flip-btn {
+	width: 100%;
+	padding: 10px;
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent, #ffffff);
+	border: none;
+	border-radius: var(--radius-s, 6px);
+	font-weight: 600;
+	cursor: pointer;
+	transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.anki-embed-flip-btn:hover {
+	opacity: 0.9;
+}
+
+.anki-embed-flip-btn:active {
+	transform: scale(0.99);
+}
+
+.anki-embed-ratings {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 8px;
+	width: 100%;
+	animation: anki-fade-in 0.2s ease-in-out;
+}
+
+.anki-embed-rate-btn {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 8px 4px;
+	border: none;
+	border-radius: var(--radius-s, 6px);
+	cursor: pointer;
+	font-weight: 600;
+	font-size: 0.85em;
+	color: #ffffff;
+	transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.anki-embed-rate-btn:hover {
+	opacity: 0.9;
+}
+
+.anki-embed-rate-btn:active {
+	transform: scale(0.98);
+}
+
+.anki-embed-rate-btn.again {
+	background-color: var(--text-error, #e53935);
+}
+
+.anki-embed-rate-btn.hard {
+	background-color: #fb8c00;
+}
+
+.anki-embed-rate-btn.good {
+	background-color: #43a047;
+}
+
+.anki-embed-rate-btn.easy {
+	background-color: #1e88e5;
+}
+
+.anki-embed-rate-key {
+	font-size: 0.75em;
+	opacity: 0.8;
+	margin-top: 2px;
+	font-weight: normal;
+}
+
+/* Completion & Empty States */
+.anki-embed-empty,
+.anki-embed-completed,
+.anki-embed-error {
+	padding: 24px 16px;
+	text-align: center;
+	color: var(--text-muted);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+}
+
+.anki-embed-error {
+	color: var(--text-error, #e53935);
+}
+
+.anki-embed-shortcut-hint {
+	font-size: 0.75em;
+	color: var(--text-muted);
+	text-align: center;
+	margin-top: 2px;
+}
