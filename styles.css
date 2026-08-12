@@ -234,6 +234,19 @@
 	color: var(--text-error, #e53935);
 }
 
+.anki-embed-error-steps {
+	text-align: left;
+	margin: 8px 0 12px 0;
+	padding-left: 20px;
+	font-size: 0.9em;
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+
+.anki-embed-error-steps li {
+	margin-bottom: 4px;
+}
+
 .anki-embed-shortcut-hint {
 	font-size: 0.75em;
 	color: var(--text-muted);

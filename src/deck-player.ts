@@ -147,7 +147,12 @@ export class DeckPlayer {
 		this.container.empty();
 		const errDiv = this.container.createDiv({ cls: 'anki-embed-error' });
 		errDiv.createEl('strong', { text: '⚠️ AnkiConnect error' });
-		errDiv.createEl('p', { text: message });
+		errDiv.createDiv({ text: message });
+
+		const steps = errDiv.createEl('ul', { cls: 'anki-embed-error-steps' });
+		steps.createEl('li', { text: '1. Launch the Anki application on your desktop.' });
+		steps.createEl('li', { text: '2. Ensure the AnkiConnect add-on (code 2055492159) is installed in Anki.' });
+		steps.createEl('li', { text: '3. Verify AnkiConnect URL in plugin settings (default: http://127.0.0.1:8765).' });
 
 		const retryBtn = errDiv.createEl('button', {
 			cls: 'anki-embed-flip-btn',
