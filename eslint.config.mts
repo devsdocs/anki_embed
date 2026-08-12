@@ -30,4 +30,11 @@ export default defineConfig(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		// ponytail: declarative getSettingDefinitions() bypasses display() on Obsidian 1.13+ runtime,
+		// breaking imperative settings controls. Suppress until declarative API supports custom controls.
+		rules: {
+			'obsidianmd/settings-tab/prefer-setting-definitions': 'off',
+		},
+	},
 );

@@ -135,58 +135,6 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	getSettingDefinitions() {
-		return [
-			{
-				key: 'ankiConnectUrl',
-				name: 'AnkiConnect URL',
-				description: 'URL of the AnkiConnect endpoint (default: http://127.0.0.1:8765)',
-				type: 'text' as const,
-				default: DEFAULT_SETTINGS.ankiConnectUrl,
-			},
-			{
-				key: 'apiKey',
-				name: 'API key',
-				description: 'Optional API key if configured in AnkiConnect',
-				type: 'text' as const,
-				default: DEFAULT_SETTINGS.apiKey,
-			},
-			{
-				key: 'defaultLimit',
-				name: 'Default card limit',
-				description: 'Maximum number of cards to load per session if not specified in code block',
-				type: 'text' as const,
-				default: String(DEFAULT_SETTINGS.defaultLimit),
-			},
-			{
-				key: 'defaultFilter',
-				name: 'Default card filter',
-				description: 'Which cards to show by default',
-				type: 'dropdown' as const,
-				options: {
-					all: 'All cards',
-					due: 'Due cards only',
-					new: 'New cards only',
-				},
-				default: DEFAULT_SETTINGS.defaultFilter,
-			},
-			{
-				key: 'randomizeCards',
-				name: 'Randomize cards',
-				description: 'Shuffle card order for review sessions',
-				type: 'boolean' as const,
-				default: DEFAULT_SETTINGS.randomizeCards,
-			},
-			{
-				key: 'minCardHeight',
-				name: 'Minimum card height',
-				description: 'Minimum height for flashcard display area (e.g. 280px)',
-				type: 'text' as const,
-				default: DEFAULT_SETTINGS.minCardHeight,
-			},
-		];
-	}
-
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
