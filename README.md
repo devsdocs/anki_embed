@@ -4,12 +4,15 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 
 ## Features
 
-- **Interactive Flashcard Player**: Review flashcards directly inside your Obsidian notes.
+- **Interactive Flashcard Player**: Review flashcards directly inside your Obsidian notes with flip animations, rating buttons (`Again`, `Hard`, `Good`, `Easy`), and session summary statistics breakdown.
+- **Interactive Deck Picker with Live Search**: Choose decks dynamically via an inline picker (`select: true`) or switch decks on the fly using the **📚 Change deck** header action.
+- **Ribbon Action**: Click the left sidebar ribbon icon to instantly pick and insert an Anki deck into your active note.
 - **Full AnkiConnect API Coverage**: Strongly-typed wrappers for all 40+ AnkiConnect endpoints (Decks, Cards, Notes, Models, Media, GUI, Stats, and Sync).
 - **AnkiConnect Integration**: Connects locally to Anki via `http://127.0.0.1:8765`.
-- **Card Rating & Sync**: Rate cards (`Again`, `Hard`, `Good`, `Easy`) and sync review status directly to Anki.
+- **Card Rating & Sync**: Rate cards and sync review status directly to Anki.
 - **Flexible Code Block Syntax**:
-  - ```anki
+  - Embedded specific deck:
+    ```anki
     deck: Japanese::Kanji
     limit: 20
     filter: due
@@ -31,11 +34,13 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
     ```anki
     query: deck:"Default" is:due tag:vocab
     ```
-- **Pasted Anki URI Auto-Conversion**: Pasting `anki://deck/...` or `anki:...` links automatically converts into an ````anki code block.
+- **Pasted Anki URI Auto-Conversion**: Pasting `anki://deck/...` or `anki:...` links automatically converts them into an ````anki code block.
 - **Command Palette Tools**:
-  - `Insert Anki Deck Embed`: Fuzzy pick an Anki deck and insert code block into active editor.
-  - `Test AnkiConnect Connection`: Instant connectivity check with Notice feedback.
-- **Keyboard Navigation**:
+  - `Insert Anki deck embed`: Fuzzy pick an Anki deck and insert code block into active editor.
+  - `Insert interactive Anki deck picker`: Inserts `select: true` interactive picker block.
+  - `Sync Anki collection`: Synchronize your Anki collection directly from Obsidian.
+  - `Test AnkiConnect connection`: Instant connectivity check with Notice feedback.
+- **Keyboard Shortcuts**:
   - `Space` / `Enter`: Reveal card answer.
   - `1`, `2`, `3`, `4`: Rate card (`1: Again`, `2: Hard`, `3: Good`, `4: Easy`).
   - `R`: Refresh deck session.
