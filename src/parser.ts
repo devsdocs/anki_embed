@@ -75,9 +75,9 @@ export function parsePastedAnkiText(text: string): { deckName: string } | null {
 }
 
 export function parseDelimitedText(text: string): string[][] {
-	const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+	const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0 && !l.trim().startsWith('#'));
 	if (lines.length === 0) {
-		throw new Error('Text is empty.');
+		throw new Error('Text is empty or only contains comments.');
 	}
 
 	const delimiters = ['\t', ';', ','];
