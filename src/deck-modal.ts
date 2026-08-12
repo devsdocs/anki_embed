@@ -10,7 +10,7 @@ export class DeckSelectModal extends FuzzySuggestModal<string> {
 		super(app);
 		this.client = client;
 		this.onSelectDeck = onSelectDeck;
-		this.setPlaceholder('Type to search for an Anki deck...');
+		this.setPlaceholder('Loading decks from Anki...');
 	}
 
 	onOpen(): void {
@@ -21,17 +21,20 @@ export class DeckSelectModal extends FuzzySuggestModal<string> {
 	private async loadDecks(): Promise<void> {
 		try {
 			this.decks = await this.client.getDeckNames();
-			this.updateSuggestions();
+			if (this.decks.length === 0) {
+				this.setPlaceholder('No decks found in Anki');
+			} else {
+				this.setPlaceholder('Type to search for an Anki deck...');
+			}
+			const updateFn = (this as unknown as Record<string, (() => void) | undefined>)['updateSuggestions'];
+			if (typeof updateFn === 'function') {
+				updateFn.call(this);
+			}
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			new Notice(`Failed to fetch decks from Anki: ${msg}`);
 			this.close();
 		}
-	}
-
-	private updateSuggestions() {
-		const inputEl = this.inputEl;
-		inputEl.dispatchEvent(new Event('input'));
 	}
 
 	getItems(): string[] {

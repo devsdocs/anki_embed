@@ -35,6 +35,10 @@ export default defineConfig(
 		// breaking imperative settings controls. Suppress until declarative API supports custom controls.
 		rules: {
 			'obsidianmd/settings-tab/prefer-setting-definitions': 'off',
+			'obsidianmd/ui/sentence-case': ['warn', {
+				enforceCamelCaseLower: true,
+				ignoreRegex: ['AnkiConnect', '^https?://', '^⚠️ AnkiConnect error$', '^↗️ Open Anki$'],
+			}],
 		},
 	},
 );

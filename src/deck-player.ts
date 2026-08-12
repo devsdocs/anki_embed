@@ -139,31 +139,51 @@ export class DeckPlayer {
 		this.renderHeader('Select deck');
 
 		const pickerDiv = this.container.createDiv({ cls: 'anki-embed-picker' });
-		pickerDiv.createDiv({ text: '📚 Choose an Anki deck to review' });
+		pickerDiv.createDiv({ cls: 'anki-embed-picker-title', text: '📚 Choose an Anki deck to review' });
 
 		try {
 			const decks = await this.client.getDeckNames();
 			if (!decks || decks.length === 0) {
-				pickerDiv.createDiv({ text: 'No decks found in Anki.' });
+				pickerDiv.createDiv({ cls: 'anki-embed-empty', text: 'No decks found in Anki.' });
 				return;
 			}
 
 			const searchInput = pickerDiv.createEl('input', {
 				cls: 'anki-embed-search-input',
-				attr: { placeholder: '🔍 Filter decks...' },
+				attr: { placeholder: '🔍 Search decks...' },
 			});
 
 			const selectEl = pickerDiv.createEl('select', { cls: 'anki-embed-select' });
 
+			const startBtn = pickerDiv.createEl('button', {
+				cls: 'anki-embed-flip-btn',
+				text: 'Start review',
+			});
+
 			const populateOptions = (filterText: string) => {
 				selectEl.empty();
-				const lower = filterText.toLowerCase();
+				const lower = filterText.trim().toLowerCase();
 				const filtered = decks.filter(d => d.toLowerCase().includes(lower));
-				for (const deck of filtered) {
-					selectEl.createEl('option', { value: deck, text: deck });
-				}
-				if (this.config.deck && filtered.includes(this.config.deck)) {
-					selectEl.value = this.config.deck;
+
+				if (filtered.length === 0) {
+					const emptyOpt = selectEl.createEl('option', {
+						value: '',
+						text: 'No matching decks found',
+					});
+					emptyOpt.disabled = true;
+					selectEl.size = 2;
+					startBtn.disabled = true;
+				} else {
+					startBtn.disabled = false;
+					for (const deck of filtered) {
+						selectEl.createEl('option', { value: deck, text: deck });
+					}
+					selectEl.size = Math.min(6, Math.max(2, filtered.length));
+					if (this.config.deck && filtered.includes(this.config.deck)) {
+						selectEl.value = this.config.deck;
+					} else if (filtered.length > 0) {
+						selectEl.selectedIndex = 0;
+					}
 				}
 			};
 
@@ -173,10 +193,12 @@ export class DeckPlayer {
 				populateOptions(searchInput.value);
 			};
 
-			const startBtn = pickerDiv.createEl('button', {
-				cls: 'anki-embed-flip-btn',
-				text: 'Start review',
-			});
+			selectEl.ondblclick = () => {
+				if (selectEl.value) {
+					startBtn.click();
+				}
+			};
+
 			startBtn.onclick = () => {
 				const chosen = selectEl.value;
 				if (chosen) {
@@ -231,7 +253,7 @@ export class DeckPlayer {
 		const steps = errDiv.createEl('ul', { cls: 'anki-embed-error-steps' });
 		steps.createEl('li', { text: '1. Launch the Anki application on your desktop.' });
 		steps.createEl('li', { text: '2. Ensure the AnkiConnect add-on (code 2055492159) is installed in Anki.' });
-		steps.createEl('li', { text: '3. Verify AnkiConnect URL in plugin settings (default: http://127.0.0.1:8765).' });
+		steps.createEl('li', { text: '3. Verify the AnkiConnect URL in plugin settings.' });
 
 		const retryBtn = errDiv.createEl('button', {
 			cls: 'anki-embed-flip-btn',
@@ -277,8 +299,7 @@ export class DeckPlayer {
 		};
 
 		const openBtn = actions.createEl('button', {
-			cls: 'anki-embed-btn-icon',
-			text: '↗️ Open Anki',
+			cls: 'anki-embed-btn-icon',				text: '↗️ Open Anki',
 			attr: { title: 'Open this deck in Anki desktop app' },
 		});
 		openBtn.onclick = () => {
@@ -412,7 +433,7 @@ export class DeckPlayer {
 		completedDiv.createEl('p', { text: `You reviewed ${this.cards.length} cards in this session.` });
 
 		const statsGrid = completedDiv.createDiv({ cls: 'anki-embed-stats-grid' });
-		
+
 		const againCard = statsGrid.createDiv({ cls: 'anki-embed-stat-card' });
 		againCard.createSpan({ text: 'Again' });
 		againCard.createEl('strong', { text: String(this.sessionStats.again) });

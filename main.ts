@@ -106,7 +106,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 			callback: async () => {
 				try {
 					const version = await this.client.testConnection();
-					new Notice(`✅ Connected to AnkiConnect (v${version})`);
+					new Notice(`✅ Connected to ankiconnect (v${version})`);
 				} catch (err: unknown) {
 					const msg = err instanceof Error ? err.message : String(err);
 					new Notice(`❌ AnkiConnect error: ${msg}`);
@@ -143,7 +143,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('AnkiConnect URL')
-			.setDesc('URL of the AnkiConnect endpoint (default: http://127.0.0.1:8765)')
+			.setDesc('The AnkiConnect endpoint address.')
 			.addText(text => text
 				.setPlaceholder('http://127.0.0.1:8765')
 				.setValue(this.plugin.settings.ankiConnectUrl)
@@ -154,7 +154,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('API key')
-			.setDesc('Optional API key if configured in AnkiConnect')
+			.setDesc('Set this if you configured an API key in AnkiConnect.')
 			.addText(text => text
 				.setPlaceholder('Leave blank if none')
 				.setValue(this.plugin.settings.apiKey)
@@ -202,9 +202,9 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Minimum card height')
-			.setDesc('Minimum height for flashcard display area (e.g. 280px)')
+			.setDesc('Minimum height for the flashcard display area.')
 			.addText(text => text
-				.setPlaceholder('280px')
+				.setPlaceholder('280')
 				.setValue(this.plugin.settings.minCardHeight)
 				.onChange(async (value) => {
 					this.plugin.settings.minCardHeight = value;
