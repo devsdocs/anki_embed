@@ -1,4 +1,4 @@
-import assert from 'node:assert';
+import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
 
