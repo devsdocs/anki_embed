@@ -479,7 +479,6 @@ export class DeckPlayer {
 		this.renderHeader(card.deckName || this.config.deck, true);
 
 		const cardEl = this.container.createDiv({ cls: 'anki-embed-card card' });
-		cardEl.style.minHeight = this.settings.minCardHeight;
 
 		const modelCss = await this.getModelCss(card.modelName);
 		if (modelCss) {
@@ -494,7 +493,7 @@ export class DeckPlayer {
 		qDiv.appendChild(qFragment);
 
 		if (this.showingAnswer) {
-			cardEl.createEl('hr');
+			const separator = cardEl.createDiv({ cls: 'anki-embed-separator' });
 			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
 			aDiv.empty();
 			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));

@@ -114,12 +114,12 @@
 	margin: 8px 0;
 }
 
-.anki-embed-card hr {
+.anki-embed-separator {
 	width: 80%;
 	border: 0;
 	height: 1px;
 	background: var(--background-modifier-border);
-	margin: 14px 0;
+	margin: 14px auto;
 }
 
 .anki-embed-cloze {
