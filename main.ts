@@ -3,6 +3,7 @@ import type { SettingDefinitionItem } from 'obsidian';
 import { AnkiClient } from './src/anki-client';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
+import { AnkiImportModal } from './src/import-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
 import { AnkiEmbedSettings, DEFAULT_SETTINGS } from './src/types';
 
@@ -112,6 +113,14 @@ export default class AnkiEmbedPlugin extends Plugin {
 					const msg = err instanceof Error ? err.message : String(err);
 					new Notice(`❌ AnkiConnect error: ${msg}`);
 				}
+			},
+		});
+
+		this.addCommand({
+			id: 'import-anki-notes',
+			name: 'Import Anki notes from CSV/tsv',
+			callback: () => {
+				new AnkiImportModal(this.app, this.client).open();
 			},
 		});
 	}

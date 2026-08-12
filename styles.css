@@ -389,3 +389,51 @@
 	align-items: center;
 	justify-content: center;
 }
+
+/* Anki Import Modal */
+.anki-import-desc {
+	margin-bottom: 20px;
+}
+.anki-import-buttons {
+	display: flex;
+	gap: 10px;
+	margin-bottom: 20px;
+}
+.anki-import-manual-area {
+	display: none;
+}
+.anki-import-manual-area.is-visible {
+	display: block;
+}
+.anki-import-textarea {
+	width: 100%;
+	height: 150px;
+	margin-bottom: 10px;
+}
+.anki-import-deck-input {
+	display: none;
+	margin-left: 10px;
+}
+.anki-import-deck-input.is-visible {
+	display: inline-block;
+}
+.anki-import-mapping-container {
+	background-color: var(--background-secondary);
+	padding: 10px;
+	border-radius: var(--radius-s, 5px);
+	margin-bottom: 15px;
+}
+.anki-import-mapping-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 5px;
+}
+.anki-import-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 20px;
+}
+.anki-import-hidden {
+	display: none;
+}

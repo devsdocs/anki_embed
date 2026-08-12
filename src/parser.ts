@@ -73,3 +73,69 @@ export function parsePastedAnkiText(text: string): { deckName: string } | null {
 
 	return null;
 }
+
+export function parseDelimitedText(text: string): string[][] {
+	const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+	if (lines.length === 0) {
+		throw new Error('Text is empty.');
+	}
+
+	const delimiters = ['\t', ';', ','];
+	let bestDelimiter = '';
+	let maxCols = 0;
+
+	// Guess delimiter by checking the first few lines
+	for (const delim of delimiters) {
+		const colsFirst = splitCsvLine(lines[0] ?? '', delim).length;
+		if (colsFirst > 1) {
+			const consistent = lines.slice(0, 5).every(l => splitCsvLine(l, delim).length === colsFirst);
+			if (consistent && colsFirst > maxCols) {
+				bestDelimiter = delim;
+				maxCols = colsFirst;
+			}
+		}
+	}
+
+	// If no multi-column delimiter found, assume single column or default to tab
+	if (!bestDelimiter) {
+		// Just split by tab anyway
+		bestDelimiter = '\t';
+	}
+
+	const parsed = lines.map(line => splitCsvLine(line, bestDelimiter).map(col => col.trim()));
+
+	// Validate consistency (fail loudly if inconsistent)
+	const colCount = parsed[0]?.length ?? 0;
+	for (let i = 1; i < parsed.length; i++) {
+		if ((parsed[i]?.length ?? 0) !== colCount) {
+			throw new Error(`Inconsistent column count at line ${i + 1}. Expected ${colCount}, found ${parsed[i]?.length ?? 0}.`);
+		}
+	}
+
+	return parsed;
+}
+
+function splitCsvLine(line: string, delimiter: string): string[] {
+	const cols: string[] = [];
+	let current = '';
+	let inQuotes = false;
+
+	for (let i = 0; i < line.length; i++) {
+		const c = line[i];
+		if (c === '"') {
+			if (inQuotes && line[i + 1] === '"') {
+				current += '"';
+				i++; // Skip escaped quote
+			} else {
+				inQuotes = !inQuotes;
+			}
+		} else if (c === delimiter && !inQuotes) {
+			cols.push(current);
+			current = '';
+		} else {
+			current += c;
+		}
+	}
+	cols.push(current);
+	return cols;
+}
