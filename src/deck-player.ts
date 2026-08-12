@@ -334,26 +334,35 @@ export class DeckPlayer {
 		}
 	}
 
-	private async resolveMediaInNode(node: HTMLElement | DocumentFragment): Promise<void> {
-		const mediaElements = Array.from(node.querySelectorAll('img[src], img[srcset], source[src], source[srcset]'));
+	private async getResolvedMediaFragment(html: string): Promise<DocumentFragment> {
+		if (!/<(?:img|source)\b/i.test(html)) {
+			return sanitizeHTMLToDom(html);
+		}
 
-		if (mediaElements.length === 0) return;
-
-		await Promise.all(mediaElements.map(async element => {
+		const parser = new DOMParser();
+		const doc = parser.parseFromString(html, 'text/html');
+		const mediaElements = Array.from(doc.body.querySelectorAll('img, source'));
+		
+		const fetchPromises = mediaElements.map(async (element, index) => {
+			const originalTitle = element.getAttribute('title');
+			const originalAlt = element.getAttribute('alt');
+			element.setAttribute('title', `anki-media-${index}`);
+			
 			const srcset = element.getAttribute('srcset');
 			const source = element.getAttribute('src')?.trim() ??
 				srcset?.split(',')[0]?.trim().split(/\s+/)[0];
+			
 			if (!source || /^[a-z][a-z\d+.-]*:/i.test(source) || source.startsWith('//')) {
-				return;
+				return { index, dataUrl: null, originalTitle, originalAlt };
 			}
 
 			let filename: string;
-				try {
-					const encodedFilename = source.split(/[?#]/, 1)[0];
-					if (!encodedFilename) return;
-					filename = decodeURIComponent(encodedFilename).replace(/^\.\/+/, '');
-				} catch {
-				return;
+			try {
+				const encodedFilename = source.split(/[?#]/, 1)[0];
+				if (!encodedFilename) return { index, dataUrl: null, originalTitle, originalAlt };
+				filename = decodeURIComponent(encodedFilename).replace(/^\.\/+/, '');
+			} catch {
+				return { index, dataUrl: null, originalTitle, originalAlt };
 			}
 
 			let mediaData = this.mediaCache.get(filename);
@@ -371,17 +380,37 @@ export class DeckPlayer {
 				const dataUrl = mediaData.startsWith('data:')
 					? mediaData
 					: `data:${this.getMediaMimeType(filename)};base64,${mediaData}`;
-				element.setAttribute('src', dataUrl);
-				element.removeAttribute('srcset');
-			} else {
-				const altText = element.getAttribute('alt');
-				if (altText) {
-					element.replaceWith(document.createTextNode(altText));
+				return { index, dataUrl, originalTitle, originalAlt };
+			}
+			
+			return { index, dataUrl: null, originalTitle, originalAlt };
+		});
+
+		const results = await Promise.all(fetchPromises);
+		
+		const fragment = sanitizeHTMLToDom(doc.body.innerHTML);
+
+		for (const res of results) {
+			const el = fragment.querySelector(`[title="anki-media-${res.index}"]`);
+			if (el) {
+				if (res.originalTitle !== null) {
+					el.setAttribute('title', res.originalTitle);
 				} else {
-					element.remove();
+					el.removeAttribute('title');
+				}
+
+				if (res.dataUrl) {
+					el.setAttribute('src', res.dataUrl);
+					el.removeAttribute('srcset');
+				} else if (res.originalAlt) {
+					el.replaceWith(document.createTextNode(res.originalAlt));
+				} else {
+					el.remove();
 				}
 			}
-		}));
+		}
+
+		return fragment;
 	}
 
 	private getMediaMimeType(filename: string): string {
@@ -420,8 +449,7 @@ export class DeckPlayer {
 
 		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
 		qDiv.empty();
-		const qFragment = sanitizeHTMLToDom(formatCardHtml(card.question));
-		await this.resolveMediaInNode(qFragment);
+		const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
 		qDiv.appendChild(qFragment);
 
 		if (this.showingAnswer) {
@@ -429,8 +457,7 @@ export class DeckPlayer {
 			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
 			aDiv.empty();
 			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
-			const aFragment = sanitizeHTMLToDom(answerHtml);
-			await this.resolveMediaInNode(aFragment);
+			const aFragment = await this.getResolvedMediaFragment(answerHtml);
 			aDiv.appendChild(aFragment);
 		}
 
