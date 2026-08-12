@@ -16,6 +16,22 @@ export default class AnkiEmbedPlugin extends Plugin {
 
 		this.addSettingTab(new AnkiEmbedSettingTab(this.app, this));
 
+		// Left Ribbon Action
+		this.addRibbonIcon('layers', 'Insert Anki deck embed', () => {
+			const view = this.app.workspace.activeEditor;
+			if (view && view.editor) {
+				new DeckSelectModal(this.app, this.client, (deckName: string) => {
+					const cursor = view.editor?.getCursor();
+					if (cursor) {
+						const codeBlock = `\`\`\`anki\ndeck: ${deckName}\n\`\`\`\n`;
+						view.editor?.replaceRange(codeBlock, cursor);
+					}
+				}).open();
+			} else {
+				new Notice('Please open a note first to insert an Anki deck.');
+			}
+		});
+
 		// On paste: wrap anki:// links in an ```anki code block
 		this.registerEvent(
 			this.app.workspace.on('editor-paste', (evt: ClipboardEvent, editor: Editor) => {
@@ -57,6 +73,30 @@ export default class AnkiEmbedPlugin extends Plugin {
 					const codeBlock = `\`\`\`anki\ndeck: ${deckName}\n\`\`\`\n`;
 					editor.replaceRange(codeBlock, cursor);
 				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'insert-interactive-anki-picker',
+			name: 'Insert interactive Anki deck picker',
+			editorCallback: (editor: Editor) => {
+				const cursor = editor.getCursor();
+				const codeBlock = '```anki\nselect: true\n```\n';
+				editor.replaceRange(codeBlock, cursor);
+			},
+		});
+
+		this.addCommand({
+			id: 'sync-anki-collection',
+			name: 'Sync Anki collection',
+			callback: async () => {
+				try {
+					await this.client.sync();
+					new Notice('✅ Anki collection synchronized successfully');
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					new Notice(`❌ Anki sync error: ${msg}`);
+				}
 			},
 		});
 

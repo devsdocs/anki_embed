@@ -13,6 +13,13 @@ export class DeckPlayer {
 	private showingAnswer: boolean = false;
 	private isLoading: boolean = false;
 
+	private sessionStats = {
+		again: 0,
+		hard: 0,
+		good: 0,
+		easy: 0,
+	};
+
 	constructor(
 		container: HTMLElement,
 		config: DeckEmbedConfig,
@@ -88,6 +95,7 @@ export class DeckPlayer {
 		this.isLoading = true;
 		this.showingAnswer = false;
 		this.currentIndex = 0;
+		this.sessionStats = { again: 0, hard: 0, good: 0, easy: 0 };
 		this.renderLoading();
 
 		try {
@@ -140,14 +148,30 @@ export class DeckPlayer {
 				return;
 			}
 
-			const selectEl = pickerDiv.createEl('select', { cls: 'anki-embed-select' });
-			for (const deck of decks) {
-				selectEl.createEl('option', { value: deck, text: deck });
-			}
+			const searchInput = pickerDiv.createEl('input', {
+				cls: 'anki-embed-search-input',
+				attr: { placeholder: '🔍 Filter decks...' },
+			});
 
-			if (this.config.deck && decks.includes(this.config.deck)) {
-				selectEl.value = this.config.deck;
-			}
+			const selectEl = pickerDiv.createEl('select', { cls: 'anki-embed-select' });
+
+			const populateOptions = (filterText: string) => {
+				selectEl.empty();
+				const lower = filterText.toLowerCase();
+				const filtered = decks.filter(d => d.toLowerCase().includes(lower));
+				for (const deck of filtered) {
+					selectEl.createEl('option', { value: deck, text: deck });
+				}
+				if (this.config.deck && filtered.includes(this.config.deck)) {
+					selectEl.value = this.config.deck;
+				}
+			};
+
+			populateOptions('');
+
+			searchInput.oninput = () => {
+				populateOptions(searchInput.value);
+			};
 
 			const startBtn = pickerDiv.createEl('button', {
 				cls: 'anki-embed-flip-btn',
@@ -319,10 +343,9 @@ export class DeckPlayer {
 			});
 			flipBtn.onclick = () => this.revealAnswer();
 
-			footer.createDiv({
-				cls: 'anki-embed-shortcut-hint',
-				text: 'Shortcut: Press Space to reveal answer',
-			});
+			const hint = footer.createDiv({ cls: 'anki-embed-shortcut-hint' });
+			hint.createSpan({ text: 'Shortcut: Press Space to reveal answer' });
+			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
 		} else {
 			const ratings = footer.createDiv({ cls: 'anki-embed-ratings' });
 
@@ -345,10 +368,9 @@ export class DeckPlayer {
 				};
 			}
 
-			footer.createDiv({
-				cls: 'anki-embed-shortcut-hint',
-				text: 'Shortcuts: Press 1 for Again, 2 for Hard, 3 for Good, 4 for Easy',
-			});
+			const hint = footer.createDiv({ cls: 'anki-embed-shortcut-hint' });
+			hint.createSpan({ text: 'Shortcuts: Press 1 for Again, 2 for Hard, 3 for Good, 4 for Easy' });
+			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
 		}
 	}
 
@@ -358,6 +380,11 @@ export class DeckPlayer {
 	}
 
 	private async rateCurrentCard(ease: 1 | 2 | 3 | 4): Promise<void> {
+		if (ease === 1) this.sessionStats.again++;
+		else if (ease === 2) this.sessionStats.hard++;
+		else if (ease === 3) this.sessionStats.good++;
+		else if (ease === 4) this.sessionStats.easy++;
+
 		const card = this.cards[this.currentIndex];
 		if (card) {
 			try {
@@ -383,6 +410,24 @@ export class DeckPlayer {
 		});
 		completedDiv.createEl('h3', { text: 'Session complete!' });
 		completedDiv.createEl('p', { text: `You reviewed ${this.cards.length} cards in this session.` });
+
+		const statsGrid = completedDiv.createDiv({ cls: 'anki-embed-stats-grid' });
+		
+		const againCard = statsGrid.createDiv({ cls: 'anki-embed-stat-card' });
+		againCard.createSpan({ text: 'Again' });
+		againCard.createEl('strong', { text: String(this.sessionStats.again) });
+
+		const hardCard = statsGrid.createDiv({ cls: 'anki-embed-stat-card' });
+		hardCard.createSpan({ text: 'Hard' });
+		hardCard.createEl('strong', { text: String(this.sessionStats.hard) });
+
+		const goodCard = statsGrid.createDiv({ cls: 'anki-embed-stat-card' });
+		goodCard.createSpan({ text: 'Good' });
+		goodCard.createEl('strong', { text: String(this.sessionStats.good) });
+
+		const easyCard = statsGrid.createDiv({ cls: 'anki-embed-stat-card' });
+		easyCard.createSpan({ text: 'Easy' });
+		easyCard.createEl('strong', { text: String(this.sessionStats.easy) });
 
 		const restartBtn = completedDiv.createEl('button', {
 			cls: 'anki-embed-flip-btn',
