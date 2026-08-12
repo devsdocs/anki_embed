@@ -14,6 +14,7 @@ export class DeckPlayer {
 	private showingAnswer: boolean = false;
 	private isLoading: boolean = false;
 	private mediaCache = new Map<string, string | null>();
+	private cssCache = new Map<string, string>();
 	private loadRequestId = 0;
 
 	private sessionStats = {
@@ -431,6 +432,39 @@ export class DeckPlayer {
 		return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
 	}
 
+	private async getModelCss(modelName: string): Promise<string> {
+		if (this.cssCache.has(modelName)) {
+			return this.cssCache.get(modelName)!;
+		}
+		try {
+			const styling = await this.client.getModelStyling(modelName);
+			const css = styling.css || '';
+			const scoped = this.scopeCss(css, '.anki-embed-card');
+			this.cssCache.set(modelName, scoped);
+			return scoped;
+		} catch {
+			return '';
+		}
+	}
+
+	private scopeCss(css: string, prefix: string): string {
+		let cleanCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
+		cleanCss = cleanCss.replace(/(^|\}|;)\s*([^{};]+)\s*\{/g, (match, before, selectors) => {
+			const scoped = selectors.split(',').map((s: string) => {
+				const trimmed = s.trim();
+				if (!trimmed || trimmed.startsWith('@') || /^[0-9]+%$/.test(trimmed) || trimmed === 'from' || trimmed === 'to') {
+					return trimmed;
+				}
+				if (trimmed === 'body' || trimmed === '.card') {
+					return prefix;
+				}
+				return `${prefix} ${trimmed}`;
+			}).join(', ');
+			return `${before}\n${scoped} {`;
+		});
+		return cleanCss;
+	}
+
 	private async renderCurrentCard() {
 		this.container.empty();
 
@@ -444,8 +478,15 @@ export class DeckPlayer {
 
 		this.renderHeader(card.deckName || this.config.deck, true);
 
-		const cardEl = this.container.createDiv({ cls: 'anki-embed-card' });
+		const cardEl = this.container.createDiv({ cls: 'anki-embed-card card' });
 		cardEl.style.minHeight = this.settings.minCardHeight;
+
+		const modelCss = await this.getModelCss(card.modelName);
+		if (modelCss) {
+			const styleEl = document.createElement('style');
+			styleEl.textContent = modelCss;
+			cardEl.appendChild(styleEl);
+		}
 
 		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
 		qDiv.empty();
