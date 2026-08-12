@@ -57,7 +57,7 @@ export class DeckPlayer {
 			if (evt.key === ' ' || evt.key === 'Enter') {
 				evt.preventDefault();
 				if (!this.showingAnswer) {
-					this.revealAnswer();
+					void this.revealAnswer();
 				}
 			} else if (this.showingAnswer && ['1', '2', '3', '4'].includes(evt.key)) {
 				evt.preventDefault();
@@ -126,20 +126,15 @@ export class DeckPlayer {
 			}
 
 			const cards = await this.client.getCardsInfo(selectedIds);
-			const preparedCards = await Promise.all(cards.map(async card => ({
-				...card,
-				question: await this.resolveMediaHtml(card.question),
-				answer: await this.resolveMediaHtml(card.answer),
-			})));
 
 			if (requestId !== this.loadRequestId) return;
-			this.cards = preparedCards;
+			this.cards = cards;
 			this.isLoading = false;
 
 			if (this.cards.length === 0) {
 				this.renderEmpty();
 			} else {
-				this.renderCurrentCard();
+				void this.renderCurrentCard();
 			}
 		} catch (err: unknown) {
 			if (requestId !== this.loadRequestId) return;
@@ -339,12 +334,10 @@ export class DeckPlayer {
 		}
 	}
 
-	private async resolveMediaHtml(html: string): Promise<string> {
-		if (!/<(?:img|source)\b/i.test(html)) return html;
+	private async resolveMediaInNode(node: HTMLElement | DocumentFragment): Promise<void> {
+		const mediaElements = Array.from(node.querySelectorAll('img[src], img[srcset], source[src], source[srcset]'));
 
-		const wrapper = createDiv();
-		wrapper.appendChild(sanitizeHTMLToDom(html));
-		const mediaElements = Array.from(wrapper.querySelectorAll('img[src], img[srcset], source[src], source[srcset]'));
+		if (mediaElements.length === 0) return;
 
 		await Promise.all(mediaElements.map(async element => {
 			const srcset = element.getAttribute('srcset');
@@ -389,8 +382,6 @@ export class DeckPlayer {
 				}
 			}
 		}));
-
-		return wrapper.innerHTML;
 	}
 
 	private getMediaMimeType(filename: string): string {
@@ -411,7 +402,7 @@ export class DeckPlayer {
 		return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
 	}
 
-	private renderCurrentCard() {
+	private async renderCurrentCard() {
 		this.container.empty();
 
 		if (this.currentIndex >= this.cards.length) {
@@ -429,14 +420,18 @@ export class DeckPlayer {
 
 		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
 		qDiv.empty();
-		qDiv.appendChild(sanitizeHTMLToDom(formatCardHtml(card.question)));
+		const qFragment = sanitizeHTMLToDom(formatCardHtml(card.question));
+		await this.resolveMediaInNode(qFragment);
+		qDiv.appendChild(qFragment);
 
 		if (this.showingAnswer) {
 			cardEl.createEl('hr');
 			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
 			aDiv.empty();
 			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
-			aDiv.appendChild(sanitizeHTMLToDom(answerHtml));
+			const aFragment = sanitizeHTMLToDom(answerHtml);
+			await this.resolveMediaInNode(aFragment);
+			aDiv.appendChild(aFragment);
 		}
 
 		const footer = this.container.createDiv({ cls: 'anki-embed-footer' });
@@ -446,7 +441,7 @@ export class DeckPlayer {
 				cls: 'anki-embed-flip-btn',
 				text: 'Show answer',
 			});
-			flipBtn.onclick = () => this.revealAnswer();
+			flipBtn.onclick = () => { void this.revealAnswer(); };
 
 			const hint = footer.createDiv({ cls: 'anki-embed-shortcut-hint' });
 			hint.createSpan({ text: 'Shortcut: Press Space to reveal answer' });
@@ -479,9 +474,9 @@ export class DeckPlayer {
 		}
 	}
 
-	private revealAnswer() {
+	private async revealAnswer() {
 		this.showingAnswer = true;
-		this.renderCurrentCard();
+		await this.renderCurrentCard();
 	}
 
 	private async rateCurrentCard(ease: 1 | 2 | 3 | 4): Promise<void> {
@@ -501,7 +496,7 @@ export class DeckPlayer {
 
 		this.currentIndex++;
 		this.showingAnswer = false;
-		this.renderCurrentCard();
+		await this.renderCurrentCard();
 	}
 
 	private renderCompleted() {
