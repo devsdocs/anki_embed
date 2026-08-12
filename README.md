@@ -47,9 +47,10 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 
 ## Prerequisites
 
-1. Install [Anki](https://apps.ankiweb.net/).
-2. Install the **AnkiConnect** add-on in Anki (Add-on code: `2055492159`).
-3. Make sure Anki is open while reviewing notes in Obsidian.
+1. Use Obsidian 1.13.0 or newer.
+2. Install [Anki](https://apps.ankiweb.net/).
+3. Install the **AnkiConnect** add-on in Anki (Add-on code: `2055492159`).
+4. Make sure Anki is open while reviewing notes in Obsidian.
 
 ## Installation
 

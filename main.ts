@@ -1,4 +1,5 @@
-import { App, Editor, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, Notice, Plugin, PluginSettingTab } from 'obsidian';
+import type { SettingDefinitionItem } from 'obsidian';
 import { AnkiClient } from './src/anki-client';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
@@ -116,13 +117,37 @@ export default class AnkiEmbedPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<AnkiEmbedSettings>);
-	}
+		const storedSettings = (await this.loadData()) as Partial<AnkiEmbedSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings ?? {});
+		let repaired = false;
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-		if (this.client) {
-			this.client.setConfig(this.settings.ankiConnectUrl, this.settings.apiKey);
+		if (typeof this.settings.ankiConnectUrl !== 'string') {
+			this.settings.ankiConnectUrl = DEFAULT_SETTINGS.ankiConnectUrl;
+			repaired = true;
+		}
+		if (typeof this.settings.apiKey !== 'string') {
+			this.settings.apiKey = DEFAULT_SETTINGS.apiKey;
+			repaired = true;
+		}
+		if (!Number.isInteger(this.settings.defaultLimit) || this.settings.defaultLimit <= 0) {
+			this.settings.defaultLimit = DEFAULT_SETTINGS.defaultLimit;
+			repaired = true;
+		}
+		if (!['all', 'due', 'new'].includes(this.settings.defaultFilter)) {
+			this.settings.defaultFilter = DEFAULT_SETTINGS.defaultFilter;
+			repaired = true;
+		}
+		if (typeof this.settings.randomizeCards !== 'boolean') {
+			this.settings.randomizeCards = DEFAULT_SETTINGS.randomizeCards;
+			repaired = true;
+		}
+		if (typeof this.settings.minCardHeight !== 'string') {
+			this.settings.minCardHeight = DEFAULT_SETTINGS.minCardHeight;
+			repaired = true;
+		}
+
+		if (repaired) {
+			await this.saveData(this.settings);
 		}
 	}
 }
@@ -135,80 +160,85 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				type: 'group',
+				heading: 'Deck display',
+				items: [
+					{
+						name: 'AnkiConnect URL',
+						desc: 'The AnkiConnect endpoint address.',
+						control: {
+							type: 'text',
+							key: 'ankiConnectUrl',
+							placeholder: 'http://127.0.0.1:8765',
+						},
+					},
+					{
+						name: 'API key',
+						desc: 'Set this if you configured an API key in AnkiConnect.',
+						control: {
+							type: 'text',
+							key: 'apiKey',
+							placeholder: 'Leave blank if none',
+						},
+					},
+					{
+						name: 'Default card limit',
+						desc: 'Maximum number of cards to load per session if not specified in code block.',
+						control: {
+							type: 'number',
+							key: 'defaultLimit',
+							defaultValue: DEFAULT_SETTINGS.defaultLimit,
+							placeholder: String(DEFAULT_SETTINGS.defaultLimit),
+							min: 1,
+							step: 1,
+							validate: (value: number) =>
+								Number.isInteger(value) && value > 0 ? undefined : 'Enter a positive whole number.',
+						},
+					},
+					{
+						name: 'Default card filter',
+						desc: 'Which cards to show by default.',
+						control: {
+							type: 'dropdown',
+							key: 'defaultFilter',
+							defaultValue: DEFAULT_SETTINGS.defaultFilter,
+							options: {
+								all: 'All cards',
+								due: 'Due cards only',
+								new: 'New cards only',
+							},
+						},
+					},
+					{
+						name: 'Randomize cards',
+						desc: 'Shuffle card order for review sessions.',
+						control: {
+							type: 'toggle',
+							key: 'randomizeCards',
+							defaultValue: DEFAULT_SETTINGS.randomizeCards,
+						},
+					},
+					{
+						name: 'Minimum card height',
+						desc: 'Minimum height for the flashcard display area.',
+						control: {
+							type: 'text',
+							key: 'minCardHeight',
+							placeholder: DEFAULT_SETTINGS.minCardHeight,
+						},
+					},
+				],
+			},
+		];
+	}
 
-		new Setting(containerEl).setName('Deck display').setHeading();
-
-		new Setting(containerEl)
-			.setName('AnkiConnect URL')
-			.setDesc('The AnkiConnect endpoint address.')
-			.addText(text => text
-				.setPlaceholder('http://127.0.0.1:8765')
-				.setValue(this.plugin.settings.ankiConnectUrl)
-				.onChange(async (value) => {
-					this.plugin.settings.ankiConnectUrl = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('API key')
-			.setDesc('Set this if you configured an API key in AnkiConnect.')
-			.addText(text => text
-				.setPlaceholder('Leave blank if none')
-				.setValue(this.plugin.settings.apiKey)
-				.onChange(async (value) => {
-					this.plugin.settings.apiKey = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Default card limit')
-			.setDesc('Maximum number of cards to load per session if not specified in code block')
-			.addText(text => text
-				.setPlaceholder('20')
-				.setValue(String(this.plugin.settings.defaultLimit))
-				.onChange(async (value) => {
-					const num = Number.parseInt(value, 10);
-					if (!Number.isNaN(num) && num > 0) {
-						this.plugin.settings.defaultLimit = num;
-						await this.plugin.saveSettings();
-					}
-				}));
-
-		new Setting(containerEl)
-			.setName('Default card filter')
-			.setDesc('Which cards to show by default')
-			.addDropdown(dropdown => dropdown
-				.addOption('all', 'All cards')
-				.addOption('due', 'Due cards only')
-				.addOption('new', 'New cards only')
-				.setValue(this.plugin.settings.defaultFilter)
-				.onChange(async (value) => {
-					this.plugin.settings.defaultFilter = value as 'all' | 'due' | 'new';
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Randomize cards')
-			.setDesc('Shuffle card order for review sessions')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.randomizeCards)
-				.onChange(async (value) => {
-					this.plugin.settings.randomizeCards = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Minimum card height')
-			.setDesc('Minimum height for the flashcard display area.')
-			.addText(text => text
-				.setPlaceholder('280')
-				.setValue(this.plugin.settings.minCardHeight)
-				.onChange(async (value) => {
-					this.plugin.settings.minCardHeight = value;
-					await this.plugin.saveSettings();
-				}));
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		await super.setControlValue(key, value);
+		if (key === 'ankiConnectUrl' || key === 'apiKey') {
+			this.plugin.client.setConfig(this.plugin.settings.ankiConnectUrl, this.plugin.settings.apiKey);
+		}
 	}
 }
