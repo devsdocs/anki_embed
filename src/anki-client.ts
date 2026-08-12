@@ -52,7 +52,15 @@ export class AnkiClient {
 				}
 				responseData = res.json as AnkiResponse<T>;
 			} else {
-				const res = await fetch(this.url, {
+				const win = typeof window !== 'undefined' ? window : null;
+				const globalFetch = win ? (win as unknown as Record<string, unknown>)['fetch'] as (
+					url: string,
+					init?: unknown
+				) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> : null;
+				if (!globalFetch) {
+					throw new Error('Network request failed: requestUrl is not available');
+				}
+				const res = await globalFetch(this.url, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify(payload),

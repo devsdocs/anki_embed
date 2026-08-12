@@ -13,11 +13,14 @@ export class DeckSelectModal extends FuzzySuggestModal<string> {
 		this.setPlaceholder('Type to search for an Anki deck...');
 	}
 
-	async onOpen() {
-		super.onOpen();
+	onOpen(): void {
+		void super.onOpen();
+		void this.loadDecks();
+	}
+
+	private async loadDecks(): Promise<void> {
 		try {
 			this.decks = await this.client.getDeckNames();
-			// Re-render suggest items once loaded
 			this.updateSuggestions();
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -27,7 +30,6 @@ export class DeckSelectModal extends FuzzySuggestModal<string> {
 	}
 
 	private updateSuggestions() {
-		// Trigger internal input event to update suggest items list
 		const inputEl = this.inputEl;
 		inputEl.dispatchEvent(new Event('input'));
 	}

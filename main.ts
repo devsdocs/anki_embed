@@ -41,7 +41,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 		const renderCodeBlock = (source: string, el: HTMLElement) => {
 			const config = parseDeckConfig(source);
 			const player = new DeckPlayer(el, config, this.client, this.settings);
-			player.init();
+			void player.init();
 		};
 
 		this.registerMarkdownCodeBlockProcessor('anki', renderCodeBlock);
@@ -50,7 +50,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 		// Commands
 		this.addCommand({
 			id: 'insert-anki-deck-embed',
-			name: 'Insert Anki Deck Embed',
+			name: 'Insert Anki deck embed',
 			editorCallback: (editor: Editor) => {
 				new DeckSelectModal(this.app, this.client, (deckName: string) => {
 					const cursor = editor.getCursor();
@@ -62,7 +62,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'test-ankiconnect-connection',
-			name: 'Test AnkiConnect Connection',
+			name: 'Test AnkiConnect connection',
 			callback: async () => {
 				try {
 					const version = await this.client.testConnection();
@@ -95,11 +95,63 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	getSettingDefinitions() {
+		return [
+			{
+				key: 'ankiConnectUrl',
+				name: 'AnkiConnect URL',
+				description: 'URL of the AnkiConnect endpoint (default: http://127.0.0.1:8765)',
+				type: 'text' as const,
+				default: DEFAULT_SETTINGS.ankiConnectUrl,
+			},
+			{
+				key: 'apiKey',
+				name: 'API key',
+				description: 'Optional API key if configured in AnkiConnect',
+				type: 'text' as const,
+				default: DEFAULT_SETTINGS.apiKey,
+			},
+			{
+				key: 'defaultLimit',
+				name: 'Default card limit',
+				description: 'Maximum number of cards to load per session if not specified in code block',
+				type: 'text' as const,
+				default: String(DEFAULT_SETTINGS.defaultLimit),
+			},
+			{
+				key: 'defaultFilter',
+				name: 'Default card filter',
+				description: 'Which cards to show by default',
+				type: 'dropdown' as const,
+				options: {
+					all: 'All cards',
+					due: 'Due cards only',
+					new: 'New cards only',
+				},
+				default: DEFAULT_SETTINGS.defaultFilter,
+			},
+			{
+				key: 'randomizeCards',
+				name: 'Randomize cards',
+				description: 'Shuffle card order for review sessions',
+				type: 'boolean' as const,
+				default: DEFAULT_SETTINGS.randomizeCards,
+			},
+			{
+				key: 'minCardHeight',
+				name: 'Minimum card height',
+				description: 'Minimum height for flashcard display area (e.g. 280px)',
+				type: 'text' as const,
+				default: DEFAULT_SETTINGS.minCardHeight,
+			},
+		];
+	}
+
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl('h2', { text: 'Anki Embed Settings' });
+		new Setting(containerEl).setName('Deck display').setHeading();
 
 		new Setting(containerEl)
 			.setName('AnkiConnect URL')
@@ -113,7 +165,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('API Key')
+			.setName('API key')
 			.setDesc('Optional API key if configured in AnkiConnect')
 			.addText(text => text
 				.setPlaceholder('Leave blank if none')
@@ -124,7 +176,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Default Card Limit')
+			.setName('Default card limit')
 			.setDesc('Maximum number of cards to load per session if not specified in code block')
 			.addText(text => text
 				.setPlaceholder('20')
@@ -138,12 +190,12 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Default Card Filter')
+			.setName('Default card filter')
 			.setDesc('Which cards to show by default')
 			.addDropdown(dropdown => dropdown
-				.addOption('all', 'All Cards')
-				.addOption('due', 'Due Cards Only')
-				.addOption('new', 'New Cards Only')
+				.addOption('all', 'All cards')
+				.addOption('due', 'Due cards only')
+				.addOption('new', 'New cards only')
 				.setValue(this.plugin.settings.defaultFilter)
 				.onChange(async (value) => {
 					this.plugin.settings.defaultFilter = value as 'all' | 'due' | 'new';
@@ -151,7 +203,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Randomize Cards')
+			.setName('Randomize cards')
 			.setDesc('Shuffle card order for review sessions')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.randomizeCards)
@@ -161,7 +213,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Minimum Card Height')
+			.setName('Minimum card height')
 			.setDesc('Minimum height for flashcard display area (e.g. 280px)')
 			.addText(text => text
 				.setPlaceholder('280px')

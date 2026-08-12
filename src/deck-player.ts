@@ -1,3 +1,4 @@
+import { sanitizeHTMLToDom } from 'obsidian';
 import { AnkiClient } from './anki-client';
 import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
 
@@ -24,10 +25,10 @@ export class DeckPlayer {
 		this.settings = settings;
 	}
 
-	public async init() {
+	public async init(): Promise<void> {
 		this.container.empty();
 		this.container.addClass('anki-embed-container');
-		this.container.tabIndex = 0; // make focusable for keypresses
+		this.container.tabIndex = 0;
 
 		this.registerKeyboardShortcuts();
 		await this.loadCards();
@@ -35,7 +36,6 @@ export class DeckPlayer {
 
 	private registerKeyboardShortcuts() {
 		this.container.addEventListener('keydown', (evt: KeyboardEvent) => {
-			// Don't intercept if target is an input/textarea
 			if (evt.target instanceof HTMLInputElement || evt.target instanceof HTMLTextAreaElement) {
 				return;
 			}
@@ -52,10 +52,10 @@ export class DeckPlayer {
 			} else if (this.showingAnswer && ['1', '2', '3', '4'].includes(evt.key)) {
 				evt.preventDefault();
 				const ease = Number.parseInt(evt.key, 10) as 1 | 2 | 3 | 4;
-				this.rateCurrentCard(ease);
+				void this.rateCurrentCard(ease);
 			} else if (evt.key.toLowerCase() === 'r') {
 				evt.preventDefault();
-				this.loadCards();
+				void this.loadCards();
 			}
 		});
 	}
@@ -79,7 +79,7 @@ export class DeckPlayer {
 		return parts.length > 0 ? parts.join(' ') : 'is:due';
 	}
 
-	public async loadCards() {
+	public async loadCards(): Promise<void> {
 		this.isLoading = true;
 		this.showingAnswer = false;
 		this.currentIndex = 0;
@@ -95,14 +95,12 @@ export class DeckPlayer {
 				return;
 			}
 
-			// Randomize if requested
 			let selectedIds = cardIds;
 			const shouldRandomize = this.config.randomize ?? this.settings.randomizeCards;
 			if (shouldRandomize) {
 				selectedIds = [...cardIds].sort(() => Math.random() - 0.5);
 			}
 
-			// Apply limit
 			const limit = this.config.limit ?? this.settings.defaultLimit;
 			if (limit > 0 && selectedIds.length > limit) {
 				selectedIds = selectedIds.slice(0, limit);
@@ -126,7 +124,7 @@ export class DeckPlayer {
 	private renderLoading() {
 		this.container.empty();
 		const loader = this.container.createDiv({ cls: 'anki-embed-empty' });
-		loader.createEl('div', { text: '⚡ Connecting to Anki...' });
+		loader.createDiv({ text: '⚡ Connecting to Anki...' });
 	}
 
 	private renderEmpty() {
@@ -134,26 +132,30 @@ export class DeckPlayer {
 		this.renderHeader('No cards');
 
 		const body = this.container.createDiv({ cls: 'anki-embed-empty' });
-		body.createEl('div', { text: '🎉 No cards found matching this query or deck.' });
-		
+		body.createDiv({ text: '🎉 No cards found matching this query or deck.' });
+
 		const refreshBtn = body.createEl('button', {
 			cls: 'anki-embed-flip-btn',
-			text: '🔄 Refresh Deck',
+			text: '🔄 Refresh deck',
 		});
-		refreshBtn.onclick = () => this.loadCards();
+		refreshBtn.onclick = () => {
+			void this.loadCards();
+		};
 	}
 
 	private renderError(message: string) {
 		this.container.empty();
 		const errDiv = this.container.createDiv({ cls: 'anki-embed-error' });
-		errDiv.createEl('strong', { text: '⚠️ AnkiConnect Error' });
+		errDiv.createEl('strong', { text: '⚠️ AnkiConnect error' });
 		errDiv.createEl('p', { text: message });
 
 		const retryBtn = errDiv.createEl('button', {
 			cls: 'anki-embed-flip-btn',
-			text: '🔄 Retry Connection',
+			text: '🔄 Retry connection',
 		});
-		retryBtn.onclick = () => this.loadCards();
+		retryBtn.onclick = () => {
+			void this.loadCards();
+		};
 	}
 
 	private renderHeader(titleText?: string) {
@@ -161,10 +163,10 @@ export class DeckPlayer {
 
 		const titleContainer = header.createDiv({ cls: 'anki-embed-title' });
 		const title = titleText || this.config.deck || this.config.query || 'Anki Deck';
-		titleContainer.createEl('span', { text: title });
+		titleContainer.createSpan({ text: title });
 
 		if (this.cards.length > 0) {
-			titleContainer.createEl('span', {
+			titleContainer.createSpan({
 				cls: 'anki-embed-badge',
 				text: `${this.currentIndex + 1} / ${this.cards.length}`,
 			});
@@ -175,26 +177,32 @@ export class DeckPlayer {
 		const refreshBtn = actions.createEl('button', {
 			cls: 'anki-embed-btn-icon',
 			text: '🔄 Refresh',
-			attr: { title: 'Refresh cards from Anki (R)' },
+			attr: { title: 'Refresh cards from Anki (r)' },
 		});
-		refreshBtn.onclick = () => this.loadCards();
+		refreshBtn.onclick = () => {
+			void this.loadCards();
+		};
 
 		const openBtn = actions.createEl('button', {
 			cls: 'anki-embed-btn-icon',
 			text: '↗️ Open Anki',
-			attr: { title: 'Open this deck in Anki Desktop app' },
+			attr: { title: 'Open this deck in Anki desktop app' },
 		});
-		openBtn.onclick = async () => {
-			const deckToOpen = this.config.deck || (this.cards[0]?.deckName);
-			if (deckToOpen) {
-				try {
-					await this.client.guiDeckReview(deckToOpen);
-				} catch (err: unknown) {
-					const msg = err instanceof Error ? err.message : String(err);
-					this.renderError(msg);
-				}
-			}
+		openBtn.onclick = () => {
+			void this.openDeckInAnki();
 		};
+	}
+
+	private async openDeckInAnki(): Promise<void> {
+		const deckToOpen = this.config.deck || (this.cards[0]?.deckName);
+		if (deckToOpen) {
+			try {
+				await this.client.guiDeckReview(deckToOpen);
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.renderError(msg);
+			}
+		}
 	}
 
 	private formatCardHtml(rawHtml: string, questionHtml?: string): string {
@@ -202,7 +210,6 @@ export class DeckPlayer {
 		if (questionHtml && result.includes('{{FrontSide}}')) {
 			result = result.replace('{{FrontSide}}', questionHtml);
 		}
-		// Strip explicit sound tags like [sound:abc.mp3] if present, into inline indicators
 		result = result.replace(/\[sound:([^\]]+)\]/gi, '🔊 <i>($1)</i>');
 		return result;
 	}
@@ -220,26 +227,26 @@ export class DeckPlayer {
 
 		this.renderHeader(card.deckName || this.config.deck);
 
-		// Card Body
 		const cardEl = this.container.createDiv({ cls: 'anki-embed-card' });
 		cardEl.style.minHeight = this.settings.minCardHeight;
 
 		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
-		qDiv.innerHTML = this.formatCardHtml(card.question);
+		qDiv.empty();
+		qDiv.appendChild(sanitizeHTMLToDom(this.formatCardHtml(card.question)));
 
 		if (this.showingAnswer) {
 			cardEl.createEl('hr');
 			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
-			aDiv.innerHTML = this.formatCardHtml(card.answer, card.question);
+			aDiv.empty();
+			aDiv.appendChild(sanitizeHTMLToDom(this.formatCardHtml(card.answer, card.question)));
 		}
 
-		// Footer / Buttons
 		const footer = this.container.createDiv({ cls: 'anki-embed-footer' });
 
 		if (!this.showingAnswer) {
 			const flipBtn = footer.createEl('button', {
 				cls: 'anki-embed-flip-btn',
-				text: 'Show Answer',
+				text: 'Show answer',
 			});
 			flipBtn.onclick = () => this.revealAnswer();
 
@@ -261,10 +268,12 @@ export class DeckPlayer {
 				const btn = ratings.createEl('button', {
 					cls: `anki-embed-rate-btn ${opt.clsName}`,
 				});
-				btn.createEl('span', { text: opt.label });
-				btn.createEl('span', { cls: 'anki-embed-rate-key', text: `[${opt.key}]` });
+				btn.createSpan({ text: opt.label });
+				btn.createSpan({ cls: 'anki-embed-rate-key', text: `[${opt.key}]` });
 
-				btn.onclick = () => this.rateCurrentCard(opt.ease);
+				btn.onclick = () => {
+					void this.rateCurrentCard(opt.ease);
+				};
 			}
 
 			footer.createDiv({
@@ -279,7 +288,7 @@ export class DeckPlayer {
 		this.renderCurrentCard();
 	}
 
-	private async rateCurrentCard(ease: 1 | 2 | 3 | 4) {
+	private async rateCurrentCard(ease: 1 | 2 | 3 | 4): Promise<void> {
 		const card = this.cards[this.currentIndex];
 		if (card) {
 			try {
@@ -299,17 +308,19 @@ export class DeckPlayer {
 		this.renderHeader();
 
 		const completedDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
-		completedDiv.createEl('div', {
+		completedDiv.createDiv({
 			cls: 'anki-embed-completed-icon',
 			text: '🎉',
 		});
-		completedDiv.createEl('h3', { text: 'Session Complete!' });
+		completedDiv.createEl('h3', { text: 'Session complete!' });
 		completedDiv.createEl('p', { text: `You reviewed ${this.cards.length} cards in this session.` });
 
 		const restartBtn = completedDiv.createEl('button', {
 			cls: 'anki-embed-flip-btn',
-			text: '🔄 Review Again',
+			text: '🔄 Review again',
 		});
-		restartBtn.onclick = () => this.loadCards();
+		restartBtn.onclick = () => {
+			void this.loadCards();
+		};
 	}
 }
