@@ -1,4 +1,4 @@
-import { sanitizeHTMLToDom } from 'obsidian';
+import { sanitizeHTMLToDom, Notice } from 'obsidian';
 import { AnkiClient } from './anki-client';
 import { extractAnswerHtml, formatCardHtml } from './card-html';
 import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
@@ -308,6 +308,27 @@ export class DeckPlayer {
 		});
 		refreshBtn.onclick = () => {
 			void this.loadCards();
+		};
+
+		const syncBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-icon',
+			text: '☁️ sync',
+			attr: { title: 'Sync with ankiweb' },
+		});
+		syncBtn.onclick = async () => {
+			const originalText = syncBtn.textContent;
+			syncBtn.textContent = '⏳';
+			syncBtn.disabled = true;
+			try {
+				await this.client.sync();
+				new Notice('Anki sync complete');
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`Anki sync failed: ${msg}`);
+			} finally {
+				syncBtn.textContent = originalText;
+				syncBtn.disabled = false;
+			}
 		};
 
 		if (showOpenAnki) {
