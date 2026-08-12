@@ -1,6 +1,7 @@
 import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
+import { extractAnswerHtml, formatCardHtml } from '../src/card-html';
 
 console.log('Running Anki Embed verification tests...');
 
@@ -48,7 +49,18 @@ assert.deepStrictEqual(paste2, { deckName: 'Default' });
 const pasteInvalid = parsePastedAnkiText('https://google.com');
 assert.strictEqual(pasteInvalid, null);
 
-// 5. Test AnkiClient payload construction & endpoint coverage
+// 5. Test rendered card answer cleanup and Anki template formatting
+const renderedAnswer = 'Question:<br>Which organism?<hr id=answer>Answer: Salmonella';
+assert.strictEqual(extractAnswerHtml(renderedAnswer), 'Answer: Salmonella');
+assert.strictEqual(extractAnswerHtml('Front<hr class="separator" id="answer" />Back'), 'Back');
+assert.strictEqual(
+	formatCardHtml('{{FrontSide}}<hr id="answer">Back side', 'Question content'),
+	'Question content<hr id="answer">Back side'
+);
+assert.strictEqual(formatCardHtml('{{FrontSide}}', '$$B_S$$'), '$$B_S$$');
+assert.strictEqual(extractAnswerHtml('Back side without a front-side marker'), 'Back side without a front-side marker');
+
+// 6. Test AnkiClient payload construction & endpoint coverage
 const client = new AnkiClient('http://127.0.0.1:8765', 'test-api-key');
 
 assert.strictEqual(typeof client.request, 'function');

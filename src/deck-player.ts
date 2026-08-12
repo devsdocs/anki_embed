@@ -1,5 +1,6 @@
 import { sanitizeHTMLToDom } from 'obsidian';
 import { AnkiClient } from './anki-client';
+import { extractAnswerHtml, formatCardHtml } from './card-html';
 import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
 
 export class DeckPlayer {
@@ -178,7 +179,7 @@ export class DeckPlayer {
 					for (const deck of filtered) {
 						selectEl.createEl('option', { value: deck, text: deck });
 					}
-					selectEl.size = Math.min(6, Math.max(2, filtered.length));
+					selectEl.size = Math.min(8, Math.max(4, filtered.length));
 					if (this.config.deck && filtered.includes(this.config.deck)) {
 						selectEl.value = this.config.deck;
 					} else if (filtered.length > 0) {
@@ -264,7 +265,7 @@ export class DeckPlayer {
 		};
 	}
 
-	private renderHeader(titleText?: string) {
+	private renderHeader(titleText?: string, showOpenAnki: boolean = false) {
 		const header = this.container.createDiv({ cls: 'anki-embed-header' });
 
 		const titleContainer = header.createDiv({ cls: 'anki-embed-title' });
@@ -298,13 +299,16 @@ export class DeckPlayer {
 			void this.loadCards();
 		};
 
-		const openBtn = actions.createEl('button', {
-			cls: 'anki-embed-btn-icon',				text: '↗️ Open Anki',
-			attr: { title: 'Open this deck in Anki desktop app' },
-		});
-		openBtn.onclick = () => {
-			void this.openDeckInAnki();
-		};
+		if (showOpenAnki) {
+			const openBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: '↗️ Open Anki',
+				attr: { title: 'Open this deck in Anki desktop app' },
+			});
+			openBtn.onclick = () => {
+				void this.openDeckInAnki();
+			};
+		}
 	}
 
 	private async openDeckInAnki(): Promise<void> {
@@ -319,15 +323,6 @@ export class DeckPlayer {
 		}
 	}
 
-	private formatCardHtml(rawHtml: string, questionHtml?: string): string {
-		let result = rawHtml;
-		if (questionHtml && result.includes('{{FrontSide}}')) {
-			result = result.replace('{{FrontSide}}', questionHtml);
-		}
-		result = result.replace(/\[sound:([^\]]+)\]/gi, '🔊 <i>($1)</i>');
-		return result;
-	}
-
 	private renderCurrentCard() {
 		this.container.empty();
 
@@ -339,20 +334,21 @@ export class DeckPlayer {
 		const card = this.cards[this.currentIndex];
 		if (!card) return;
 
-		this.renderHeader(card.deckName || this.config.deck);
+		this.renderHeader(card.deckName || this.config.deck, true);
 
 		const cardEl = this.container.createDiv({ cls: 'anki-embed-card' });
 		cardEl.style.minHeight = this.settings.minCardHeight;
 
 		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
 		qDiv.empty();
-		qDiv.appendChild(sanitizeHTMLToDom(this.formatCardHtml(card.question)));
+		qDiv.appendChild(sanitizeHTMLToDom(formatCardHtml(card.question)));
 
 		if (this.showingAnswer) {
 			cardEl.createEl('hr');
 			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
 			aDiv.empty();
-			aDiv.appendChild(sanitizeHTMLToDom(this.formatCardHtml(card.answer, card.question)));
+			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
+			aDiv.appendChild(sanitizeHTMLToDom(answerHtml));
 		}
 
 		const footer = this.container.createDiv({ cls: 'anki-embed-footer' });
