@@ -36,7 +36,7 @@ export class DeckPlayer {
 
 	private registerKeyboardShortcuts() {
 		this.container.addEventListener('keydown', (evt: KeyboardEvent) => {
-			if (evt.target instanceof HTMLInputElement || evt.target instanceof HTMLTextAreaElement) {
+			if (evt.target instanceof HTMLInputElement || evt.target instanceof HTMLTextAreaElement || evt.target instanceof HTMLSelectElement) {
 				return;
 			}
 
@@ -80,6 +80,11 @@ export class DeckPlayer {
 	}
 
 	public async loadCards(): Promise<void> {
+		if (this.config.select || (!this.config.deck && !this.config.query)) {
+			await this.renderDeckPicker();
+			return;
+		}
+
 		this.isLoading = true;
 		this.showingAnswer = false;
 		this.currentIndex = 0;
@@ -121,6 +126,47 @@ export class DeckPlayer {
 		}
 	}
 
+	private async renderDeckPicker(): Promise<void> {
+		this.container.empty();
+		this.renderHeader('Select deck');
+
+		const pickerDiv = this.container.createDiv({ cls: 'anki-embed-picker' });
+		pickerDiv.createDiv({ text: '📚 Choose an Anki deck to review' });
+
+		try {
+			const decks = await this.client.getDeckNames();
+			if (!decks || decks.length === 0) {
+				pickerDiv.createDiv({ text: 'No decks found in Anki.' });
+				return;
+			}
+
+			const selectEl = pickerDiv.createEl('select', { cls: 'anki-embed-select' });
+			for (const deck of decks) {
+				selectEl.createEl('option', { value: deck, text: deck });
+			}
+
+			if (this.config.deck && decks.includes(this.config.deck)) {
+				selectEl.value = this.config.deck;
+			}
+
+			const startBtn = pickerDiv.createEl('button', {
+				cls: 'anki-embed-flip-btn',
+				text: 'Start review',
+			});
+			startBtn.onclick = () => {
+				const chosen = selectEl.value;
+				if (chosen) {
+					this.config.deck = chosen;
+					this.config.select = false;
+					void this.loadCards();
+				}
+			};
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			this.renderError(msg);
+		}
+	}
+
 	private renderLoading() {
 		this.container.empty();
 		const loader = this.container.createDiv({ cls: 'anki-embed-empty' });
@@ -134,12 +180,21 @@ export class DeckPlayer {
 		const body = this.container.createDiv({ cls: 'anki-embed-empty' });
 		body.createDiv({ text: '🎉 No cards found matching this query or deck.' });
 
-		const refreshBtn = body.createEl('button', {
+		const actions = body.createDiv({ cls: 'anki-embed-actions' });
+		const refreshBtn = actions.createEl('button', {
 			cls: 'anki-embed-flip-btn',
 			text: '🔄 Refresh deck',
 		});
 		refreshBtn.onclick = () => {
 			void this.loadCards();
+		};
+
+		const changeBtn = actions.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: '📚 Change deck',
+		});
+		changeBtn.onclick = () => {
+			void this.renderDeckPicker();
 		};
 	}
 
@@ -178,6 +233,15 @@ export class DeckPlayer {
 		}
 
 		const actions = header.createDiv({ cls: 'anki-embed-actions' });
+
+		const pickerBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-icon',
+			text: '📚 Change deck',
+			attr: { title: 'Switch to another deck' },
+		});
+		pickerBtn.onclick = () => {
+			void this.renderDeckPicker();
+		};
 
 		const refreshBtn = actions.createEl('button', {
 			cls: 'anki-embed-btn-icon',

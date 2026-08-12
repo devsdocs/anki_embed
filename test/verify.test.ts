@@ -30,6 +30,14 @@ assert.strictEqual(config3.query, 'deck:"Default" is:due tag:vocab');
 assert.strictEqual(config3.limit, 10);
 assert.strictEqual(config3.filter, 'new');
 
+// 3b. Test parseDeckConfig - Interactive select format
+const configSelect = parseDeckConfig('select: true');
+assert.strictEqual(configSelect.select, true);
+
+const configSelectQuestion = parseDeckConfig('deck: ?');
+assert.strictEqual(configSelectQuestion.select, true);
+assert.strictEqual(configSelectQuestion.deck, undefined);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });

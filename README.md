@@ -19,6 +19,14 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
     ```anki-embed
     Medical::Pharmacology
     ```
+  - Interactive deck picker:
+    ```anki
+    select: true
+    ```
+    or
+    ```anki
+    deck: ?
+    ```
   - Custom search queries:
     ```anki
     query: deck:"Default" is:due tag:vocab

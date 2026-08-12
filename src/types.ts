@@ -22,6 +22,7 @@ export interface DeckEmbedConfig {
 	limit?: number;
 	filter?: 'all' | 'due' | 'new';
 	randomize?: boolean;
+	select?: boolean;
 }
 
 export interface AnkiCardField {

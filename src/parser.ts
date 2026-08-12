@@ -37,8 +37,16 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 			} else if (key === 'randomize' || key === 'shuffle') {
 				config.randomize = val.toLowerCase() === 'true' || val === '1' || val.toLowerCase() === 'yes';
 				hasKeyValue = true;
+			} else if (key === 'select' || key === 'interactive') {
+				config.select = val.toLowerCase() === 'true' || val === '1' || val.toLowerCase() === 'yes';
+				hasKeyValue = true;
 			}
 		}
+	}
+
+	if (config.deck === '?' || config.deck?.toLowerCase() === 'select' || config.deck?.toLowerCase() === 'choose') {
+		config.select = true;
+		delete config.deck;
 	}
 
 	// If no explicit key:value pairs were detected, treat the raw string as deck name or query
