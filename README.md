@@ -53,6 +53,10 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 3. Install the **AnkiConnect** add-on in Anki (Add-on code: `2055492159`).
 4. Make sure Anki is open while reviewing notes in Obsidian.
 
+> [!TIP]
+> **Want to use this plugin on Obsidian Mobile or without keeping Anki open?**
+> You can host [anki-docker-server](https://github.com/devsdocs/anki-docker-server) on a remote VPS. Just point this plugin's AnkiConnect URL setting to your server's IP to unlock full headless and mobile capabilities!
+
 ## Installation
 
 1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
