@@ -38,6 +38,7 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 - **Command Palette Tools**:
   - `Insert Anki deck embed`: Fuzzy pick an Anki deck and insert code block into active editor.
   - `Insert interactive Anki deck picker`: Inserts `select: true` interactive picker block.
+  - `Import Anki notes from CSV/TSV`: Opens a step-by-step modal to paste and map CSV/TSV data directly into an Anki deck.
   - `Sync Anki collection`: Synchronize your Anki collection directly from Obsidian.
   - `Test AnkiConnect connection`: Instant connectivity check with Notice feedback.
 - **Keyboard Shortcuts**:
@@ -57,6 +58,10 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
 2. Place them in your vault's `.obsidian/plugins/anki-embed/` folder.
 3. Enable **Anki Embed** in Obsidian settings.
+
+## Known Limitations
+
+- **Review Time Statistics**: Due to limitations in the AnkiConnect API, this plugin cannot send the actual time you spent reviewing a card. When you submit an answer from Obsidian, Anki records the time taken as roughly **0 seconds**. Your card scheduling and intervals will still calculate perfectly, but your total "Review Time" statistics in Anki will be artificially low for cards reviewed via the embed.
 
 ## License
 

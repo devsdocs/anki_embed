@@ -13,6 +13,7 @@ export class DeckPlayer {
 	private currentIndex: number = 0;
 	private showingAnswer: boolean = false;
 	private isLoading: boolean = false;
+	private hasStarted: boolean = false;
 	private mediaCache = new Map<string, string | null>();
 	private loadRequestId = 0;
 
@@ -51,6 +52,15 @@ export class DeckPlayer {
 			}
 
 			if (this.cards.length === 0 || this.currentIndex >= this.cards.length) {
+				return;
+			}
+
+			if (!this.hasStarted) {
+				if (evt.key === ' ' || evt.key === 'Enter') {
+					evt.preventDefault();
+					this.hasStarted = true;
+					void this.renderCurrentCard();
+				}
 				return;
 			}
 
@@ -133,6 +143,8 @@ export class DeckPlayer {
 
 			if (this.cards.length === 0) {
 				this.renderEmpty();
+			} else if (!this.hasStarted) {
+				this.renderStartScreen();
 			} else {
 				void this.renderCurrentCard();
 			}
@@ -215,6 +227,7 @@ export class DeckPlayer {
 				if (chosen) {
 					this.config.deck = chosen;
 					this.config.select = false;
+					this.hasStarted = true;
 					void this.loadCards();
 				}
 			};
@@ -223,6 +236,32 @@ export class DeckPlayer {
 			const msg = err instanceof Error ? err.message : String(err);
 			this.renderError(msg);
 		}
+	}
+
+	private renderStartScreen() {
+		this.container.empty();
+		this.renderHeader();
+
+		const startDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
+		startDiv.createDiv({
+			cls: 'anki-embed-completed-icon',
+			text: '▶️',
+		});
+		startDiv.createEl('h3', { text: 'Ready to review' });
+		startDiv.createEl('p', { text: `Found ${this.cards.length} cards matching your criteria.` });
+
+		const startBtn = startDiv.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: 'Start session',
+		});
+		startBtn.onclick = () => {
+			this.hasStarted = true;
+			void this.renderCurrentCard();
+		};
+
+		const hint = startDiv.createDiv({ cls: 'anki-embed-shortcut-hint', attr: { style: 'margin-top: 16px;' } });
+		hint.createSpan({ text: 'Shortcut: Press Space to start' });
+		hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
 	}
 
 	private renderLoading() {
