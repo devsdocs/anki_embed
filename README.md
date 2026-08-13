@@ -54,7 +54,7 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 4. Make sure Anki is open while reviewing notes in Obsidian.
 
 > [!TIP]
-> **Want to use this plugin on Obsidian Mobile or without keeping Anki open?**
+> **Want to use this plugin on Obsidian Mobile or without ever keeping Anki open on your computer?**
 > You can host [anki-docker-server](https://github.com/devsdocs/anki-docker-server) on a remote VPS. Just point this plugin's AnkiConnect URL setting to your server's IP to unlock full headless and mobile capabilities!
 
 ## Installation
