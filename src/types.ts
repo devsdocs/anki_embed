@@ -5,6 +5,7 @@ export interface AnkiEmbedSettings {
 	defaultFilter: 'all' | 'due' | 'new';
 	randomizeCards: boolean;
 	minCardHeight: string;
+	useCustomAnkiConnect: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -14,6 +15,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	defaultFilter: 'all',
 	randomizeCards: true,
 	minCardHeight: '280px',
+	useCustomAnkiConnect: false,
 };
 
 export interface DeckEmbedConfig {
@@ -97,6 +99,7 @@ export interface AnkiDeckStats {
 export interface AnkiAnswerParam {
 	cardId: number;
 	ease: 1 | 2 | 3 | 4;
+	time?: number;
 }
 
 export interface AnkiPermissionResult {

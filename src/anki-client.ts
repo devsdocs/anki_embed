@@ -149,9 +149,9 @@ export class AnkiClient {
 		return await this.request<boolean[]>('answerCards', { answers });
 	}
 
-	public async answerCard(cardId: number, ease: 1 | 2 | 3 | 4): Promise<boolean> {
+	public async answerCard(cardId: number, ease: 1 | 2 | 3 | 4, time?: number): Promise<boolean> {
 		try {
-			const res = await this.answerCards([{ cardId, ease }]);
+			const res = await this.answerCards([{ cardId, ease, time }]);
 			return Array.isArray(res) ? (res[0] ?? true) : true;
 		} catch {
 			return await this.guiAnswerCard(ease);

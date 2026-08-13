@@ -63,9 +63,10 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 2. Place them in your vault's `.obsidian/plugins/anki-embed/` folder.
 3. Enable **Anki Embed** in Obsidian settings.
 
-## Known Limitations
+## Known Limitations & Custom Fork Solution
 
-- **Review Time Statistics**: Due to limitations in the AnkiConnect API, this plugin cannot send the actual time you spent reviewing a card. When you submit an answer from Obsidian, Anki records the time taken as roughly **0 seconds**. Your card scheduling and intervals will still calculate perfectly, but your total "Review Time" statistics in Anki will be artificially low for cards reviewed via the embed.
+- **Review Time Statistics**: Due to limitations in the official AnkiConnect API, it cannot record the actual time you spent reviewing a card (it logs as 0 seconds). 
+  - **The Solution:** We provide a heavily modified **[Custom AnkiConnect Fork](https://github.com/devsdocs/anki-connect/releases)** that adds time-tracking capabilities. If you install this custom `.ankiaddon` package instead of the official one, simply enable **"Use custom AnkiConnect"** in your Obsidian settings to unlock perfectly accurate review time statistics!
 
 ## License
 

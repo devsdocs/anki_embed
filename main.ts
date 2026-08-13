@@ -154,6 +154,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.minCardHeight = DEFAULT_SETTINGS.minCardHeight;
 			repaired = true;
 		}
+		if (typeof this.settings.useCustomAnkiConnect !== 'boolean') {
+			this.settings.useCustomAnkiConnect = DEFAULT_SETTINGS.useCustomAnkiConnect;
+			repaired = true;
+		}
 
 		if (repaired) {
 			await this.saveData(this.settings);
@@ -182,6 +186,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'text',
 							key: 'ankiConnectUrl',
 							placeholder: 'http://127.0.0.1:8765',
+						},
+					},
+					{
+						name: 'Use custom AnkiConnect',
+						desc: 'Enable this if you are using the devsdocs/anki-connect fork. Enables time-tracking for answers.',
+						control: {
+							type: 'toggle',
+							key: 'useCustomAnkiConnect',
+							defaultValue: DEFAULT_SETTINGS.useCustomAnkiConnect,
 						},
 					},
 					{

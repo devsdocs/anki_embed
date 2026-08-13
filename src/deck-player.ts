@@ -16,6 +16,7 @@ export class DeckPlayer {
 	private hasStarted: boolean = false;
 	private mediaCache = new Map<string, string | null>();
 	private loadRequestId = 0;
+	private cardStartTime: number = 0;
 
 	private sessionStats = {
 		again: 0,
@@ -494,6 +495,10 @@ export class DeckPlayer {
 	private async renderCurrentCard() {
 		this.container.empty();
 
+		if (!this.showingAnswer) {
+			this.cardStartTime = Date.now();
+		}
+
 		if (this.currentIndex >= this.cards.length) {
 			this.renderCompleted();
 			return;
@@ -566,6 +571,9 @@ export class DeckPlayer {
 	}
 
 	private async rateCurrentCard(ease: 1 | 2 | 3 | 4): Promise<void> {
+		const timeTaken = this.cardStartTime > 0 ? Date.now() - this.cardStartTime : undefined;
+		this.cardStartTime = 0;
+
 		if (ease === 1) this.sessionStats.again++;
 		else if (ease === 2) this.sessionStats.hard++;
 		else if (ease === 3) this.sessionStats.good++;
@@ -574,7 +582,8 @@ export class DeckPlayer {
 		const card = this.cards[this.currentIndex];
 		if (card) {
 			try {
-				await this.client.answerCard(card.cardId, ease);
+				const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;
+				await this.client.answerCard(card.cardId, ease, timeParam);
 			} catch (err) {
 				console.warn('Failed to record card answer in Anki:', err);
 			}
