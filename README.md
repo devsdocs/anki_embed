@@ -4,9 +4,10 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
 
 ## Features
 
-- **Interactive Flashcard Player**: Review flashcards directly inside your Obsidian notes with flip animations, rating buttons (`Again`, `Hard`, `Good`, `Easy`), and session summary statistics breakdown.
+- **Full Editor View & Note Embeds**: Review flashcard decks directly in full workspace editor tabs (`ItemView`) or embedded inside notes. Seamlessly switch from in-note embeds to full view with the **Full view** header action.
+- **Interactive Flashcard Player**: Review flashcards with flip animations, rating buttons (`Again`, `Hard`, `Good`, `Easy`), and session summary statistics breakdown.
 - **Interactive Deck Picker with Live Search**: Choose decks dynamically via an inline picker (`select: true`) or switch decks on the fly using the **📚 Change deck** header action.
-- **Ribbon Action**: Click the left sidebar ribbon icon to instantly pick and insert an Anki deck into your active note.
+- **Ribbon Action**: Click the left sidebar ribbon icon to open Anki review in a full editor view or insert a deck into your active note.
 - **Full AnkiConnect API Coverage**: Strongly-typed wrappers for all 40+ AnkiConnect endpoints (Decks, Cards, Notes, Models, Media, GUI, Stats, and Sync).
 - **AnkiConnect Integration**: Connects locally to Anki via `http://127.0.0.1:8765`.
 - **Card Rating & Sync**: Rate cards and sync review status directly to Anki.
@@ -36,6 +37,8 @@ An Obsidian plugin that embeds interactive Anki flashcard decks directly into yo
     ```
 - **Pasted Anki URI Auto-Conversion**: Pasting `anki://deck/...` or `anki:...` links automatically converts them into an ````anki code block.
 - **Command Palette Tools**:
+  - `Open Anki review in full view`: Opens interactive Anki review directly in a full workspace tab.
+  - `Open Anki deck in full view`: Fuzzy search and open any Anki deck in a full workspace tab.
   - `Insert Anki deck embed`: Fuzzy pick an Anki deck and insert code block into active editor.
   - `Insert interactive Anki deck picker`: Inserts `select: true` interactive picker block.
   - `Import Anki notes from CSV/TSV`: Opens a step-by-step modal to paste and map CSV/TSV data directly into an Anki deck.

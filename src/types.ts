@@ -18,6 +18,8 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	useCustomAnkiConnect: false,
 };
 
+export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
+
 export interface DeckEmbedConfig {
 	deck?: string;
 	query?: string;
@@ -25,6 +27,7 @@ export interface DeckEmbedConfig {
 	filter?: 'all' | 'due' | 'new';
 	randomize?: boolean;
 	select?: boolean;
+	[key: string]: unknown;
 }
 
 export interface AnkiCardField {

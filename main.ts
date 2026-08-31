@@ -1,11 +1,12 @@
-import { App, Editor, Notice, Plugin, PluginSettingTab } from 'obsidian';
+import { App, Editor, Notice, Plugin, PluginSettingTab, WorkspaceLeaf } from 'obsidian';
 import type { SettingDefinitionItem } from 'obsidian';
 import { AnkiClient } from './src/anki-client';
+import { AnkiView } from './src/anki-view';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
 import { AnkiImportModal } from './src/import-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
-import { AnkiEmbedSettings, DEFAULT_SETTINGS } from './src/types';
+import { AnkiEmbedSettings, DEFAULT_SETTINGS, DeckEmbedConfig, VIEW_TYPE_ANKI_EMBED } from './src/types';
 
 export default class AnkiEmbedPlugin extends Plugin {
 	settings!: AnkiEmbedSettings;
@@ -16,10 +17,15 @@ export default class AnkiEmbedPlugin extends Plugin {
 
 		this.client = new AnkiClient(this.settings.ankiConnectUrl, this.settings.apiKey);
 
+		this.registerView(
+			VIEW_TYPE_ANKI_EMBED,
+			(leaf) => new AnkiView(leaf, this.client, () => this.settings)
+		);
+
 		this.addSettingTab(new AnkiEmbedSettingTab(this.app, this));
 
 		// Left Ribbon Action
-		this.addRibbonIcon('layers', 'Insert Anki deck embed', () => {
+		this.addRibbonIcon('layers', 'Open Anki review in full view', () => {
 			const view = this.app.workspace.activeEditor;
 			if (view && view.editor) {
 				new DeckSelectModal(this.app, this.client, (deckName: string) => {
@@ -30,7 +36,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 					}
 				}).open();
 			} else {
-				new Notice('Please open a note first to insert an Anki deck.');
+				void this.activateView();
 			}
 		});
 
@@ -58,7 +64,16 @@ export default class AnkiEmbedPlugin extends Plugin {
 		// Register Code Block Processors: ```anki and ```anki-embed
 		const renderCodeBlock = (source: string, el: HTMLElement) => {
 			const config = parseDeckConfig(source);
-			const player = new DeckPlayer(el, config, this.client, this.settings);
+			const player = new DeckPlayer(
+				el,
+				config,
+				this.client,
+				this.settings,
+				(cfg) => {
+					void this.activateView(cfg);
+				},
+				false
+			);
 			void player.init();
 		};
 
@@ -66,6 +81,24 @@ export default class AnkiEmbedPlugin extends Plugin {
 		this.registerMarkdownCodeBlockProcessor('anki-embed', renderCodeBlock);
 
 		// Commands
+		this.addCommand({
+			id: 'open-anki-review-in-full-view',
+			name: 'Open Anki review in full view',
+			callback: () => {
+				void this.activateView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-anki-deck-in-full-view',
+			name: 'Open Anki deck in full view',
+			callback: () => {
+				new DeckSelectModal(this.app, this.client, (deckName: string) => {
+					void this.activateView({ deck: deckName });
+				}).open();
+			},
+		});
+
 		this.addCommand({
 			id: 'insert-anki-deck-embed',
 			name: 'Insert Anki deck embed',
@@ -123,6 +156,29 @@ export default class AnkiEmbedPlugin extends Plugin {
 				new AnkiImportModal(this.app, this.client).open();
 			},
 		});
+	}
+
+	async activateView(config?: DeckEmbedConfig, newTab: boolean = true): Promise<AnkiView> {
+		let leaf: WorkspaceLeaf | null = null;
+		if (!newTab) {
+			const existingLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+			if (existingLeaves.length > 0 && existingLeaves[0]) {
+				leaf = existingLeaves[0];
+			}
+		}
+
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf('tab');
+		}
+
+		await leaf.setViewState({
+			type: VIEW_TYPE_ANKI_EMBED,
+			active: true,
+			state: config ?? { select: true },
+		});
+
+		await this.app.workspace.revealLeaf(leaf);
+		return leaf.view as AnkiView;
 	}
 
 	async loadSettings() {

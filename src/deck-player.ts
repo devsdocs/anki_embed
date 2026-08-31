@@ -25,25 +25,41 @@ export class DeckPlayer {
 		easy: 0,
 	};
 
+	private onOpenFullView?: (config: DeckEmbedConfig) => void;
+	private onDeckChange?: (deck: string) => void;
+	private isFullView: boolean;
+
 	constructor(
 		container: HTMLElement,
 		config: DeckEmbedConfig,
 		client: AnkiClient,
-		settings: AnkiEmbedSettings
+		settings: AnkiEmbedSettings,
+		onOpenFullView?: (config: DeckEmbedConfig) => void,
+		isFullView: boolean = false,
+		onDeckChange?: (deck: string) => void
 	) {
 		this.container = container;
 		this.config = config;
 		this.client = client;
 		this.settings = settings;
+		this.onOpenFullView = onOpenFullView;
+		this.isFullView = isFullView;
+		this.onDeckChange = onDeckChange;
 	}
 
 	public async init(): Promise<void> {
 		this.container.empty();
 		this.container.addClass('anki-embed-container');
+		if (this.isFullView) {
+			this.container.addClass('is-full-view');
+		}
 		this.container.tabIndex = 0;
 
 		this.registerKeyboardShortcuts();
 		await this.loadCards();
+		if (this.isFullView) {
+			this.container.focus();
+		}
 	}
 
 	private registerKeyboardShortcuts() {
@@ -229,6 +245,7 @@ export class DeckPlayer {
 					this.config.deck = chosen;
 					this.config.select = false;
 					this.hasStarted = true;
+					this.onDeckChange?.(chosen);
 					void this.loadCards();
 				}
 			};
@@ -331,6 +348,17 @@ export class DeckPlayer {
 		}
 
 		const actions = header.createDiv({ cls: 'anki-embed-actions' });
+
+		if (this.onOpenFullView && !this.isFullView) {
+			const fullViewBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: 'Full view',
+				attr: { title: 'Open in full editor view' },
+			});
+			fullViewBtn.onclick = () => {
+				this.onOpenFullView?.(this.config);
+			};
+		}
 
 		const pickerBtn = actions.createEl('button', {
 			cls: 'anki-embed-btn-icon',

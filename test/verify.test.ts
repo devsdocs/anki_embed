@@ -2,8 +2,12 @@ import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
 import { extractAnswerHtml, formatCardHtml } from '../src/card-html';
+import { VIEW_TYPE_ANKI_EMBED } from '../src/types';
 
 console.log('Running Anki Embed verification tests...');
+
+// 0. Test VIEW_TYPE_ANKI_EMBED constant
+assert.strictEqual(VIEW_TYPE_ANKI_EMBED, 'anki-embed-view');
 
 // 1. Test parseDeckConfig - Key-Value format
 const config1 = parseDeckConfig(`
