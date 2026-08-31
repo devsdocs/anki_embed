@@ -47,12 +47,16 @@ export class AnkiView extends ItemView {
 			void this.player?.loadCards();
 		});
 
-		this.addAction('layers', 'Change deck', () => {
-			this.config = { select: true };
-			this.renderPlayer();
+		this.addAction('layers', 'Back to deck selection', () => {
+			this.resetView();
 		});
 
 		this.renderPlayer();
+	}
+
+	public resetView(): void {
+		this.config = { select: true };
+		this.player?.resetToDeckPicker();
 	}
 
 	async onClose(): Promise<void> {

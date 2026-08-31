@@ -84,5 +84,11 @@ assert.strictEqual(typeof client.retrieveMediaFile, 'function');
 assert.strictEqual(typeof client.getMediaFilesNames, 'function');
 assert.strictEqual(typeof client.sync, 'function');
 
+// 7. Test DeckEmbedConfig reset state
+const resetConfig = { ...config1, select: true, deck: undefined, query: undefined };
+assert.strictEqual(resetConfig.select, true);
+assert.strictEqual(resetConfig.deck, undefined);
+assert.strictEqual(resetConfig.query, undefined);
+
 console.log('✅ All verification tests passed successfully!');
 

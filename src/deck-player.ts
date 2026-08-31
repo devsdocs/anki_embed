@@ -173,9 +173,22 @@ export class DeckPlayer {
 		}
 	}
 
+	public resetToDeckPicker(): void {
+		this.hasStarted = false;
+		this.currentIndex = 0;
+		this.showingAnswer = false;
+		this.sessionStats = { again: 0, hard: 0, good: 0, easy: 0 };
+		this.cards = [];
+		this.config.select = true;
+		this.config.deck = undefined;
+		this.config.query = undefined;
+		this.onDeckChange?.('');
+		void this.renderDeckPicker();
+	}
+
 	private async renderDeckPicker(requestId: number = this.loadRequestId): Promise<void> {
 		this.container.empty();
-		this.renderHeader('Select deck');
+		this.renderHeader('Select deck', false, true);
 
 		const pickerDiv = this.container.createDiv({ cls: 'anki-embed-picker' });
 		pickerDiv.createDiv({ cls: 'anki-embed-picker-title', text: '📚 Choose an Anki deck to review' });
@@ -277,6 +290,14 @@ export class DeckPlayer {
 			void this.renderCurrentCard();
 		};
 
+		const changeBtn = startDiv.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: '↩ Back to deck selection',
+		});
+		changeBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
+
 		const hint = startDiv.createDiv({ cls: 'anki-embed-shortcut-hint', attr: { style: 'margin-top: 16px;' } });
 		hint.createSpan({ text: 'Shortcut: Press Space to start' });
 		hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
@@ -306,10 +327,10 @@ export class DeckPlayer {
 
 		const changeBtn = actions.createEl('button', {
 			cls: 'anki-embed-flip-btn',
-			text: '📚 Change deck',
+			text: '↩ Back to deck selection',
 		});
 		changeBtn.onclick = () => {
-			void this.renderDeckPicker();
+			this.resetToDeckPicker();
 		};
 	}
 
@@ -333,7 +354,7 @@ export class DeckPlayer {
 		};
 	}
 
-	private renderHeader(titleText?: string, showOpenAnki: boolean = false) {
+	private renderHeader(titleText?: string, showOpenAnki: boolean = false, isPicker: boolean = false) {
 		const header = this.container.createDiv({ cls: 'anki-embed-header' });
 
 		const titleContainer = header.createDiv({ cls: 'anki-embed-title' });
@@ -360,22 +381,28 @@ export class DeckPlayer {
 			};
 		}
 
-		const pickerBtn = actions.createEl('button', {
-			cls: 'anki-embed-btn-icon',
-			text: '📚 Change deck',
-			attr: { title: 'Switch to another deck' },
-		});
-		pickerBtn.onclick = () => {
-			void this.renderDeckPicker();
-		};
+		if (!isPicker) {
+			const pickerBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: '↩ Deck selection',
+				attr: { title: 'Reset view and back to deck selection' },
+			});
+			pickerBtn.onclick = () => {
+				this.resetToDeckPicker();
+			};
+		}
 
 		const refreshBtn = actions.createEl('button', {
 			cls: 'anki-embed-btn-icon',
 			text: '🔄 Refresh',
-			attr: { title: 'Refresh cards from Anki (r)' },
+			attr: { title: isPicker ? 'Refresh decks from Anki' : 'Refresh cards from Anki (r)' },
 		});
 		refreshBtn.onclick = () => {
-			void this.loadCards();
+			if (isPicker) {
+				void this.renderDeckPicker();
+			} else {
+				void this.loadCards();
+			}
 		};
 
 		const syncBtn = actions.createEl('button', {
@@ -591,6 +618,16 @@ export class DeckPlayer {
 			hint.createSpan({ text: 'Shortcuts: Press 1 for Again, 2 for Hard, 3 for Good, 4 for Easy' });
 			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
 		}
+
+		const resetRow = footer.createDiv({ cls: 'anki-embed-reset-row' });
+		const resetBtn = resetRow.createEl('button', {
+			cls: 'anki-embed-btn-link',
+			text: '↩ Back to deck selection',
+			attr: { title: 'Reset view and back to deck selection' },
+		});
+		resetBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
 	}
 
 	private async revealAnswer() {
@@ -658,6 +695,14 @@ export class DeckPlayer {
 		});
 		restartBtn.onclick = () => {
 			void this.loadCards();
+		};
+
+		const changeBtn = completedDiv.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: '↩ Back to deck selection',
+		});
+		changeBtn.onclick = () => {
+			this.resetToDeckPicker();
 		};
 	}
 }

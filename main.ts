@@ -100,6 +100,19 @@ export default class AnkiEmbedPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'reset-anki-view-to-deck-selection',
+			name: 'Reset Anki view to deck selection',
+			callback: () => {
+				const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+				for (const leaf of leaves) {
+					if (leaf.view instanceof AnkiView) {
+						leaf.view.resetView();
+					}
+				}
+			},
+		});
+
+		this.addCommand({
 			id: 'insert-anki-deck-embed',
 			name: 'Insert Anki deck embed',
 			editorCallback: (editor: Editor) => {
