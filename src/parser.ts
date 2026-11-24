@@ -48,6 +48,14 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 					config.styles = false;
 				}
 				hasKeyValue = true;
+			} else if (key === 'live' || key === 'livesync' || key === 'sync') {
+				const valLower = val.toLowerCase();
+				if (['true', '1', 'yes', 'live', 'on'].includes(valLower)) {
+					config.live = true;
+				} else if (['false', '0', 'no', 'off', 'none'].includes(valLower)) {
+					config.live = false;
+				}
+				hasKeyValue = true;
 			}
 		}
 	}

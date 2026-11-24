@@ -7,6 +7,7 @@ export interface AnkiEmbedSettings {
 	minCardHeight: string;
 	useCustomAnkiConnect: boolean;
 	useCardStyles: boolean;
+	liveSync: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -18,6 +19,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	minCardHeight: '280px',
 	useCustomAnkiConnect: false,
 	useCardStyles: true,
+	liveSync: false,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -30,6 +32,7 @@ export interface DeckEmbedConfig {
 	randomize?: boolean;
 	select?: boolean;
 	styles?: boolean;
+	live?: boolean;
 	[key: string]: unknown;
 }
 
@@ -56,6 +59,8 @@ export interface AnkiCardInfo {
 	left?: number;
 	mod?: number;
 	note?: number;
+	buttons?: number[];
+	nextReviews?: string[];
 }
 
 export interface AnkiNoteMedia {

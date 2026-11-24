@@ -231,6 +231,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.useCardStyles = DEFAULT_SETTINGS.useCardStyles;
 			repaired = true;
 		}
+		if (typeof this.settings.liveSync !== 'boolean') {
+			this.settings.liveSync = DEFAULT_SETTINGS.liveSync;
+			repaired = true;
+		}
 
 		if (repaired) {
 			await this.saveData(this.settings);
@@ -323,6 +327,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'useCardStyles',
 							defaultValue: DEFAULT_SETTINGS.useCardStyles,
+						},
+					},
+					{
+						name: 'Live sync with Anki desktop reviewer',
+						desc: 'Mirror the active review screen from the Anki desktop app. Answering in Obsidian advances Anki, and answering in Anki advances Obsidian.',
+						control: {
+							type: 'toggle',
+							key: 'liveSync',
+							defaultValue: DEFAULT_SETTINGS.liveSync,
 						},
 					},
 					{

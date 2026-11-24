@@ -18,6 +18,12 @@ export class DeckPlayer {
 	private modelStyleCache = new Map<string, string>();
 	private loadRequestId = 0;
 	private cardStartTime: number = 0;
+	private liveSyncTimer: number | null = null;
+	private onWindowFocusHandler: (() => void) | null = null;
+
+	private get isLiveSync(): boolean {
+		return this.config.live ?? this.settings.liveSync;
+	}
 
 	private sessionStats = {
 		again: 0,
@@ -119,7 +125,8 @@ export class DeckPlayer {
 
 	public async loadCards(): Promise<void> {
 		const requestId = ++this.loadRequestId;
-		if (this.config.select || (!this.config.deck && !this.config.query)) {
+		if (this.config.select || (!this.config.deck && !this.config.query && !this.isLiveSync)) {
+			this.stopLiveSyncWatcher();
 			await this.renderDeckPicker(requestId);
 			return;
 		}
@@ -129,6 +136,14 @@ export class DeckPlayer {
 		this.currentIndex = 0;
 		this.sessionStats = { again: 0, hard: 0, good: 0, easy: 0 };
 		this.renderLoading();
+
+		if (this.isLiveSync) {
+			this.startLiveSyncWatcher();
+			await this.loadLiveCards(requestId);
+			return;
+		} else {
+			this.stopLiveSyncWatcher();
+		}
 
 		try {
 			const query = this.buildQuery();
@@ -174,7 +189,200 @@ export class DeckPlayer {
 		}
 	}
 
+	private async loadLiveCards(requestId: number = this.loadRequestId): Promise<void> {
+		try {
+			let currentCard = await this.client.guiCurrentCard();
+
+			if (this.config.deck) {
+				const isReviewingTarget = currentCard?.deckName?.toLowerCase() === this.config.deck.toLowerCase();
+				if (!currentCard || !isReviewingTarget) {
+					try {
+						await this.client.guiDeckReview(this.config.deck);
+						currentCard = await this.client.guiCurrentCard();
+					} catch {
+						// Ignore
+					}
+				}
+			}
+
+			if (requestId !== this.loadRequestId) return;
+			this.isLoading = false;
+
+			if (!currentCard) {
+				this.cards = [];
+				this.renderEmptyLive();
+				return;
+			}
+
+			this.cards = [currentCard];
+			this.currentIndex = 0;
+
+			if (!this.hasStarted) {
+				this.renderStartScreenLive(currentCard);
+			} else {
+				void this.renderCurrentCard();
+			}
+		} catch (err: unknown) {
+			if (requestId !== this.loadRequestId) return;
+			this.isLoading = false;
+			const msg = err instanceof Error ? err.message : String(err);
+			this.renderError(msg);
+		}
+	}
+
+	private renderEmptyLive() {
+		this.container.empty();
+		this.renderHeader('Live reviewer');
+
+		const body = this.container.createDiv({ cls: 'anki-embed-empty' });
+		body.createDiv({ text: '⚡ Live sync: Anki desktop is not currently in review mode.' });
+
+		const hint = body.createDiv({ cls: 'anki-embed-empty-hint', attr: { style: 'margin-top: 8px; font-size: 0.9em; opacity: 0.8;' } });
+		hint.setText(this.config.deck
+			? `Start reviewing "${this.config.deck}" in Anki or click below:`
+			: 'Open a deck for review in Anki desktop to mirror it here.');
+
+		const actions = body.createDiv({ cls: 'anki-embed-actions', attr: { style: 'margin-top: 14px; justify-content: center;' } });
+		if (this.config.deck) {
+			const startAnkiBtn = actions.createEl('button', {
+				cls: 'anki-embed-flip-btn',
+				text: `▶️ Review "${this.config.deck}" in Anki`,
+			});
+			startAnkiBtn.onclick = async () => {
+				if (this.config.deck) {
+					try {
+						await this.client.guiDeckReview(this.config.deck);
+						void this.loadCards();
+					} catch (err: unknown) {
+						const msg = err instanceof Error ? err.message : String(err);
+						this.renderError(msg);
+					}
+				}
+			};
+		}
+
+		const refreshBtn = actions.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: '🔄 Check Anki now',
+		});
+		refreshBtn.onclick = () => {
+			void this.loadCards();
+		};
+
+		const toggleOffBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: 'Switch to offline deck mode',
+		});
+		toggleOffBtn.onclick = () => {
+			this.config.live = false;
+			void this.loadCards();
+		};
+	}
+
+	private renderStartScreenLive(currentCard: AnkiCardInfo) {
+		this.container.empty();
+		this.renderHeader(currentCard.deckName || this.config.deck);
+
+		const startDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
+		startDiv.createDiv({
+			cls: 'anki-embed-completed-icon',
+			text: '⚡',
+		});
+		startDiv.createEl('h3', { text: 'Connected to Anki live review' });
+		startDiv.createEl('p', { text: `Active deck: ${currentCard.deckName || 'Current Deck'}. Obsidian and Anki desktop will stay synchronized.` });
+
+		const startBtn = startDiv.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: 'Start synced session',
+		});
+		startBtn.onclick = () => {
+			this.hasStarted = true;
+			void this.renderCurrentCard();
+		};
+
+		const changeBtn = startDiv.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: 'Switch to offline deck mode',
+		});
+		changeBtn.onclick = () => {
+			this.config.live = false;
+			void this.loadCards();
+		};
+
+		const hint = startDiv.createDiv({ cls: 'anki-embed-shortcut-hint', attr: { style: 'margin-top: 16px;' } });
+		hint.createSpan({ text: 'Shortcut: Press Space to start' });
+		hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
+	}
+
+	private startLiveSyncWatcher() {
+		this.stopLiveSyncWatcher();
+		if (!this.isLiveSync) return;
+
+		this.liveSyncTimer = window.setInterval(() => {
+			void (async () => {
+				if (!this.isLiveSync || this.isLoading || !this.hasStarted) return;
+				if (!this.container.isConnected) {
+					this.stopLiveSyncWatcher();
+					return;
+				}
+				try {
+					const currentCard = await this.client.guiCurrentCard();
+					if (!currentCard) {
+						if (this.cards.length > 0) {
+							this.cards = [];
+							this.renderCompleted();
+						}
+						return;
+					}
+					const existingCard = this.cards[this.currentIndex];
+					if (!existingCard || existingCard.cardId !== currentCard.cardId) {
+						this.cards = [currentCard];
+						this.currentIndex = 0;
+						this.showingAnswer = false;
+						await this.renderCurrentCard();
+					}
+				} catch {
+					// Ignore
+				}
+			})();
+		}, 1500);
+
+		this.onWindowFocusHandler = () => {
+			void (async () => {
+				if (!this.isLiveSync || this.isLoading || !this.hasStarted) return;
+				try {
+					const currentCard = await this.client.guiCurrentCard();
+					if (currentCard && currentCard.cardId !== this.cards[this.currentIndex]?.cardId) {
+						this.cards = [currentCard];
+						this.currentIndex = 0;
+						this.showingAnswer = false;
+						await this.renderCurrentCard();
+					}
+				} catch {
+					// Ignore
+				}
+			})();
+		};
+		window.addEventListener('focus', this.onWindowFocusHandler);
+	}
+
+	public stopLiveSyncWatcher() {
+		if (this.liveSyncTimer !== null) {
+			window.clearInterval(this.liveSyncTimer);
+			this.liveSyncTimer = null;
+		}
+		if (this.onWindowFocusHandler) {
+			window.removeEventListener('focus', this.onWindowFocusHandler);
+			this.onWindowFocusHandler = null;
+		}
+	}
+
+	public destroy(): void {
+		this.stopLiveSyncWatcher();
+	}
+
 	public resetToDeckPicker(): void {
+		this.stopLiveSyncWatcher();
 		this.hasStarted = false;
 		this.currentIndex = 0;
 		this.showingAnswer = false;
@@ -363,13 +571,33 @@ export class DeckPlayer {
 		titleContainer.createSpan({ text: title });
 
 		if (this.cards.length > 0) {
-			titleContainer.createSpan({
-				cls: 'anki-embed-badge',
-				text: `${this.currentIndex + 1} / ${this.cards.length}`,
-			});
+			if (this.isLiveSync) {
+				titleContainer.createSpan({
+					cls: 'anki-embed-badge anki-embed-badge-live',
+					text: '⚡ Live sync',
+				});
+			} else {
+				titleContainer.createSpan({
+					cls: 'anki-embed-badge',
+					text: `${this.currentIndex + 1} / ${this.cards.length}`,
+				});
+			}
 		}
 
 		const actions = header.createDiv({ cls: 'anki-embed-actions' });
+
+		if (!isPicker) {
+			const liveBtn = actions.createEl('button', {
+				cls: `anki-embed-btn-icon ${this.isLiveSync ? 'is-active' : ''}`,
+				text: this.isLiveSync ? '⚡ Live' : '⚡ Live off',
+				attr: { title: this.isLiveSync ? 'Live sync with Anki desktop is ON. Click to switch to offline deck mode.' : 'Live sync with Anki desktop is OFF. Click to turn ON.' },
+			});
+			liveBtn.onclick = () => {
+				this.config.live = !this.isLiveSync;
+				this.hasStarted = true;
+				void this.loadCards();
+			};
+		}
 
 		if (this.onOpenFullView && !this.isFullView) {
 			const fullViewBtn = actions.createEl('button', {
@@ -742,11 +970,16 @@ ${normalizedCss}
 				{ ease: 4, label: 'Easy', clsName: 'easy', key: '4' },
 			];
 
-			for (const opt of options) {
+			for (let i = 0; i < options.length; i++) {
+				const opt = options[i];
+				if (!opt) continue;
 				const btn = ratings.createEl('button', {
 					cls: `anki-embed-rate-btn ${opt.clsName}`,
 				});
-				btn.createSpan({ text: opt.label });
+				const labelText = (this.isLiveSync && card.nextReviews?.[i])
+					? `${opt.label} (${card.nextReviews[i]})`
+					: opt.label;
+				btn.createSpan({ text: labelText });
 				btn.createSpan({ cls: 'anki-embed-rate-key', text: `[${opt.key}]` });
 
 				btn.onclick = () => {
@@ -772,6 +1005,13 @@ ${normalizedCss}
 
 	private async revealAnswer() {
 		this.showingAnswer = true;
+		if (this.isLiveSync) {
+			try {
+				await this.client.guiShowAnswer();
+			} catch {
+				// Ignore
+			}
+		}
 		await this.renderCurrentCard();
 	}
 
@@ -785,6 +1025,33 @@ ${normalizedCss}
 		else if (ease === 4) this.sessionStats.easy++;
 
 		const card = this.cards[this.currentIndex];
+
+		if (this.isLiveSync) {
+			try {
+				await this.client.guiShowAnswer();
+				await this.client.guiAnswerCard(ease);
+			} catch (err) {
+				console.warn('Failed to answer card in Anki GUI:', err);
+			}
+
+			this.showingAnswer = false;
+			try {
+				const nextCard = await this.client.guiCurrentCard();
+				if (nextCard) {
+					this.cards = [nextCard];
+					this.currentIndex = 0;
+					await this.renderCurrentCard();
+				} else {
+					this.cards = [];
+					this.renderCompleted();
+				}
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.renderError(msg);
+			}
+			return;
+		}
+
 		if (card) {
 			try {
 				const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;

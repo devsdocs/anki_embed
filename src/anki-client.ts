@@ -295,6 +295,18 @@ export class AnkiClient {
 		return await this.request<boolean>('guiUndo');
 	}
 
+	public async guiCurrentCard(): Promise<AnkiCardInfo | null> {
+		return await this.request<AnkiCardInfo | null>('guiCurrentCard');
+	}
+
+	public async guiShowQuestion(): Promise<boolean> {
+		return await this.request<boolean>('guiShowQuestion');
+	}
+
+	public async guiShowAnswer(): Promise<boolean> {
+		return await this.request<boolean>('guiShowAnswer');
+	}
+
 	public async guiAnswerCard(ease: 1 | 2 | 3 | 4): Promise<boolean> {
 		return await this.request<boolean>('guiAnswerCard', { ease });
 	}

@@ -56,6 +56,16 @@ assert.strictEqual(configStylesObsidian.styles, false);
 const configStylesFalse = parseDeckConfig('styles: false');
 assert.strictEqual(configStylesFalse.styles, false);
 
+// 3d. Test parseDeckConfig - live sync format
+const configLiveTrue = parseDeckConfig('live: true');
+assert.strictEqual(configLiveTrue.live, true);
+
+const configSyncLive = parseDeckConfig('sync: live');
+assert.strictEqual(configSyncLive.live, true);
+
+const configLiveFalse = parseDeckConfig('live: false');
+assert.strictEqual(configLiveFalse.live, false);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
@@ -103,6 +113,10 @@ assert.strictEqual(typeof client.getModelFieldNames, 'function');
 assert.strictEqual(typeof client.suspendCards, 'function');
 assert.strictEqual(typeof client.unsuspendCards, 'function');
 assert.strictEqual(typeof client.guiBrowse, 'function');
+assert.strictEqual(typeof client.guiCurrentCard, 'function');
+assert.strictEqual(typeof client.guiShowQuestion, 'function');
+assert.strictEqual(typeof client.guiShowAnswer, 'function');
+assert.strictEqual(typeof client.guiAnswerCard, 'function');
 assert.strictEqual(typeof client.storeMediaFile, 'function');
 assert.strictEqual(typeof client.retrieveMediaFile, 'function');
 assert.strictEqual(typeof client.getMediaFilesNames, 'function');
@@ -114,8 +128,9 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true and liveSync: false
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
+assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 
 console.log('✅ All verification tests passed successfully!');
 

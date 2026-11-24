@@ -57,6 +57,11 @@
 	font-weight: 500;
 }
 
+.anki-embed-badge.anki-embed-badge-live {
+	background-color: #10b981;
+	color: #ffffff;
+}
+
 .anki-embed-actions {
 	display: flex;
 	align-items: center;
@@ -79,6 +84,11 @@
 	align-items: center;
 	gap: 4px;
 	transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.anki-embed-btn-icon.is-active {
+	color: #10b981;
+	font-weight: 600;
 }
 
 .anki-embed-btn-icon:hover {

@@ -61,6 +61,7 @@ export class AnkiView extends ItemView {
 
 	async onClose(): Promise<void> {
 		this.contentEl.empty();
+		this.player?.destroy();
 		this.player = null;
 	}
 
