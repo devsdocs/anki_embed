@@ -3200,11 +3200,13 @@ ${normalizedCss}
 				tagsSection = `\n---\n\n## Tags\n${tags.map(t => `- \`${t}\``).join('\n')}\n`;
 			}
 
+			const shouldAutoLink = this.settings.autoLinkExportedCard ?? true;
+			const ankiCardsBlock = shouldAutoLink
+				? `anki-cards:\n  - ${card.cardId}\nanki-card-id: ${card.cardId}\nanki-note-id: ${card.note ?? ''}`
+				: `anki-note-id: ${card.note ?? ''}`;
+
 			const noteContent = `---
-anki-cards:
-  - ${card.cardId}
-anki-card-id: ${card.cardId}
-anki-note-id: ${card.note ?? ''}
+${ankiCardsBlock}
 deck: "${deckName}"
 tags:
   - anki
@@ -3221,7 +3223,6 @@ ${answerBody}
 ## Personal Notes
 
 
-${tagsSection}
 ---
 
 ## Card Details
@@ -3232,11 +3233,13 @@ ${tagsSection}
 \`\`\`anki
 card: ${card.cardId}
 \`\`\`
-`;
+${tagsSection}`;
 
 			const file = await this.app.vault.create(filename, noteContent);
 			new Notice(`Created note: ${file.basename}`);
-			await this.linkNoteToCard(file, card.cardId);
+			if (shouldAutoLink) {
+				await this.linkNoteToCard(file, card.cardId);
+			}
 
 			const leaf = this.app.workspace.getLeaf('tab');
 			await leaf.openFile(file);
@@ -3286,7 +3289,8 @@ card: ${card.cardId}
 			// Clean, single collapsible callout with question for the title and the answer underneath
 			const cleanQuestionTitle = content.question.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim() || title;
 			const answerLines = content.answer.trim().split('\n').map((l) => `> ${l}`).join('\n');
-			const cardSnippet = `> [!question]- ${cleanQuestionTitle}\n${answerLines}\n`;
+			const shouldAutoLink = this.settings.autoLinkExportedCard ?? true;
+			const cardSnippet = `> [!question]- ${cleanQuestionTitle}\n${answerLines}\n> [Anki Card](obsidian://anki-card?cardId=${card.cardId})\n`;
 
 			const heading = (this.settings.cardAppendHeading || '## Anki Reviews').trim();
 
@@ -3300,7 +3304,10 @@ card: ${card.cardId}
 					}
 				}
 				const initialContent = heading ? `${heading}\n\n${cardSnippet}\n` : `${cardSnippet}\n`;
-				await this.app.vault.create(targetPath, initialContent);
+				const created = await this.app.vault.create(targetPath, initialContent);
+				if (shouldAutoLink && created instanceof TFile) {
+					await this.linkNoteToCard(created, card.cardId);
+				}
 				new Notice(`Appended card to ${targetPath}`);
 				return;
 			}
@@ -3320,6 +3327,9 @@ card: ${card.cardId}
 				}
 
 				await this.app.vault.modify(targetFile, newContent);
+				if (shouldAutoLink) {
+					await this.linkNoteToCard(targetFile, card.cardId);
+				}
 				new Notice(`Appended card to ${targetFile.basename}`);
 			}
 		} catch (err: unknown) {

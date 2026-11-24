@@ -154,6 +154,7 @@ export interface AnkiEmbedSettings {
 	enableCardLinks: boolean;
 	enableBacklinks: boolean;
 	enableTagLinks: boolean;
+	autoLinkExportedCard: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -187,6 +188,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	enableCardLinks: true,
 	enableBacklinks: true,
 	enableTagLinks: true,
+	autoLinkExportedCard: true,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';

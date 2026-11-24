@@ -424,6 +424,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.enableTagLinks = DEFAULT_SETTINGS.enableTagLinks;
 			repaired = true;
 		}
+		if (typeof this.settings.autoLinkExportedCard !== 'boolean') {
+			this.settings.autoLinkExportedCard = DEFAULT_SETTINGS.autoLinkExportedCard;
+			repaired = true;
+		}
 		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
 			this.settings.gamepadMapping = Object.assign({}, DEFAULT_GAMEPAD_MAPPING);
 			repaired = true;
@@ -672,6 +676,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'enableTagLinks',
 							defaultValue: DEFAULT_SETTINGS.enableTagLinks,
+						},
+					},
+					{
+						name: 'Automatically link exported card notes',
+						desc: 'Automatically link notes created or exported from Anki cards so they appear in backlinks and the links menu (enabled by default).',
+						control: {
+							type: 'toggle',
+							key: 'autoLinkExportedCard',
+							defaultValue: DEFAULT_SETTINGS.autoLinkExportedCard,
 						},
 					},
 					{

@@ -4,18 +4,17 @@
 	border: 1px solid var(--background-modifier-border);
 	background-color: var(--background-primary-alt);
 	border-radius: var(--radius-m, 8px);
-	padding: 16px;
+	padding: 0;
 	margin: 12px 0;
 	display: flex;
 	flex-direction: column;
-	gap: 12px;
+	gap: 0;
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 	font-family: var(--font-text);
 	transition: border-color 0.2s ease, box-shadow 0.2s ease;
 	position: relative;
 	min-height: 220px;
-	overflow-y: auto;
-	overflow-x: hidden;
+	overflow: hidden;
 	max-height: min(80vh, 720px);
 	box-sizing: border-box;
 }
@@ -37,10 +36,12 @@
 	justify-content: space-between;
 	flex-wrap: nowrap;
 	gap: 8px;
-	padding-bottom: 8px;
+	padding: 8px 14px 7px 14px;
+	margin: 0;
 	border-bottom: 1px solid var(--background-modifier-border);
 	font-size: 0.9em;
 	flex-shrink: 0;
+	background-color: var(--background-primary);
 }
 
 .anki-embed-title {
@@ -127,10 +128,12 @@
 /* Card Body */
 .anki-embed-card {
 	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
+	border: none;
 	border-radius: var(--radius-s, 6px);
 	padding: 16px 20px;
 	min-height: 140px;
+	margin: 0;
+	width: 100%;
 	flex: 1 1 auto;
 	display: flex;
 	flex-direction: column;
@@ -153,6 +156,9 @@
 	border: none !important;
 	border-radius: var(--radius-s, 6px) !important;
 	background-color: transparent;
+	width: 100%;
+	flex: 1 1 auto;
+	min-height: 140px;
 	overflow-x: auto;
 	overflow-y: auto;
 	overflow: hidden;
@@ -205,8 +211,10 @@
 	flex-direction: column;
 	align-items: center;
 	gap: 6px;
-	margin-top: 8px;
+	margin: 0;
+	padding: 8px 14px 10px 14px;
 	flex-shrink: 0;
+	background-color: var(--background-primary-alt);
 }
 
 .anki-embed-footer-controls {

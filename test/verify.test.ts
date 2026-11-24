@@ -274,6 +274,7 @@ assert.deepStrictEqual(DEFAULT_SETTINGS.cardLinks, {});
 assert.strictEqual(DEFAULT_SETTINGS.enableCardLinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableBacklinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableTagLinks, true);
+assert.strictEqual(DEFAULT_SETTINGS.autoLinkExportedCard, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableGamepad, true);
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[0], 'flip_or_good');
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[4], 'undo');
