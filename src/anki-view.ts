@@ -9,15 +9,18 @@ export class AnkiView extends ItemView {
 	private config: DeckEmbedConfig = { select: true };
 	private client: AnkiClient;
 	private getSettings: () => AnkiEmbedSettings;
+	private saveSettings?: (settings: AnkiEmbedSettings) => Promise<void>;
 
 	constructor(
 		leaf: WorkspaceLeaf,
 		client: AnkiClient,
-		getSettings: () => AnkiEmbedSettings
+		getSettings: () => AnkiEmbedSettings,
+		saveSettings?: (settings: AnkiEmbedSettings) => Promise<void>
 	) {
 		super(leaf);
 		this.client = client;
 		this.getSettings = getSettings;
+		this.saveSettings = saveSettings;
 		this.navigation = true;
 	}
 
@@ -122,7 +125,8 @@ export class AnkiView extends ItemView {
 				this.config.select = false;
 				this.app.workspace.requestSaveLayout();
 			},
-			this.app
+			this.app,
+			this.saveSettings
 		);
 		void this.player.init();
 	}

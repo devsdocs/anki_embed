@@ -292,11 +292,27 @@ export class AnkiClient {
 	}
 
 	public async guiDeckReview(name: string): Promise<boolean> {
-		return await this.request<boolean>('guiDeckReview', { name });
+		try {
+			return await this.request<boolean>('guiDeckReview', { name });
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				return false;
+			}
+			throw err;
+		}
 	}
 
 	public async guiUndo(): Promise<boolean> {
-		return await this.request<boolean>('guiUndo');
+		try {
+			return await this.request<boolean>('guiUndo');
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				return false;
+			}
+			throw err;
+		}
 	}
 
 	public async guiCurrentCard(): Promise<AnkiCardInfo | null> {

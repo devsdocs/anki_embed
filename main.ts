@@ -27,7 +27,15 @@ export default class AnkiEmbedPlugin extends Plugin {
 
 		this.registerView(
 			VIEW_TYPE_ANKI_EMBED,
-			(leaf) => new AnkiView(leaf, this.client, () => this.settings)
+			(leaf) =>
+				new AnkiView(
+					leaf,
+					this.client,
+					() => this.settings,
+					async (updated) => {
+						await this.saveData(updated);
+					}
+				)
 		);
 
 		this.addSettingTab(new AnkiEmbedSettingTab(this.app, this));
@@ -331,8 +339,20 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.cardAppendHeading = DEFAULT_SETTINGS.cardAppendHeading;
 			repaired = true;
 		}
+		if (typeof this.settings.cardFontScale !== 'number' || this.settings.cardFontScale <= 0) {
+			this.settings.cardFontScale = DEFAULT_SETTINGS.cardFontScale;
+			repaired = true;
+		}
 		if (typeof this.settings.enableGamepad !== 'boolean') {
 			this.settings.enableGamepad = DEFAULT_SETTINGS.enableGamepad;
+			repaired = true;
+		}
+		if (typeof this.settings.enableCardLinks !== 'boolean') {
+			this.settings.enableCardLinks = DEFAULT_SETTINGS.enableCardLinks;
+			repaired = true;
+		}
+		if (typeof this.settings.enableBacklinks !== 'boolean') {
+			this.settings.enableBacklinks = DEFAULT_SETTINGS.enableBacklinks;
 			repaired = true;
 		}
 		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
@@ -559,6 +579,24 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 						},
 					},
 					{
+						name: 'Enable card note linking',
+						desc: 'Display the link button in card headers to link cards with Obsidian notes.',
+						control: {
+							type: 'toggle',
+							key: 'enableCardLinks',
+							defaultValue: DEFAULT_SETTINGS.enableCardLinks,
+						},
+					},
+					{
+						name: 'Enable backlinks detection',
+						desc: 'Scan the vault for notes that mention or embed this card (backlinks). Requires card note linking to be enabled.',
+						control: {
+							type: 'toggle',
+							key: 'enableBacklinks',
+							defaultValue: DEFAULT_SETTINGS.enableBacklinks,
+						},
+					},
+					{
 						name: 'Enable Anki Remote and controller support',
 						desc: 'Support gamepads, 8BitDo Micro/Zero 2, and Bluetooth remotes (ContAnki style) for rating, flipping, undoing, and suspending.',
 						control: {
@@ -593,6 +631,32 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 						},
 					},
 					{
+						name: 'Card font size scale',
+						desc: 'Scale card font size relative to the original Anki note styling (e.g. x1.1, x1.2 up to x2.5).',
+						control: {
+							type: 'dropdown',
+							key: 'cardFontScale',
+							defaultValue: '1',
+							options: {
+								'0.8': 'x0.8 (Smaller)',
+								'0.9': 'x0.9',
+								'1': 'x1.0 (Original size)',
+								'1.1': 'x1.1',
+								'1.2': 'x1.2',
+								'1.3': 'x1.3',
+								'1.4': 'x1.4',
+								'1.5': 'x1.5',
+								'1.6': 'x1.6',
+								'1.7': 'x1.7',
+								'1.8': 'x1.8',
+								'1.9': 'x1.9',
+								'2': 'x2.0 (Double)',
+								'2.2': 'x2.2',
+								'2.5': 'x2.5',
+							},
+						},
+					},
+					{
 						name: 'Live sync with Anki desktop reviewer',
 						desc: 'Mirror the active review screen from the Anki desktop app. Answering in Obsidian advances Anki, and answering in Anki advances Obsidian.',
 						control: {
@@ -615,7 +679,21 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 		];
 	}
 
+	getControlValue(key: string): unknown {
+		if (key === 'cardFontScale') {
+			const val = this.plugin.settings.cardFontScale ?? 1.0;
+			return String(val);
+		}
+		return super.getControlValue(key);
+	}
+
 	async setControlValue(key: string, value: unknown): Promise<void> {
+		if (key === 'cardFontScale') {
+			const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
+			this.plugin.settings.cardFontScale = Number.isNaN(parsed) || parsed <= 0 ? 1.0 : parsed;
+			await this.plugin.saveData(this.plugin.settings);
+			return;
+		}
 		await super.setControlValue(key, value);
 		if (key === 'ankiConnectUrl' || key === 'apiKey') {
 			this.plugin.client.setConfig(this.plugin.settings.ankiConnectUrl, this.plugin.settings.apiKey);

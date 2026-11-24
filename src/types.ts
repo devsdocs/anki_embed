@@ -18,6 +18,15 @@ export type RemoteAction =
 	| 'append_card_note'
 	| 'create_card_note'
 	| 'toggle_timer'
+	| 'link_active_note'
+	| 'unlink_active_note'
+	| 'search_link_note'
+	| 'create_link_note'
+	| 'open_links_menu'
+	| 'open_anki_browser'
+	| 'sync_anki'
+	| 'refresh_cards'
+	| 'deck_picker'
 	| 'none';
 
 export const REMOTE_ACTION_LABELS: Record<RemoteAction, string> = {
@@ -37,6 +46,15 @@ export const REMOTE_ACTION_LABELS: Record<RemoteAction, string> = {
 	append_card_note: 'Append card Q&A to daily or target note',
 	create_card_note: 'Create new note from card',
 	toggle_timer: 'Pause / Resume timer',
+	link_active_note: 'Link active note to card',
+	unlink_active_note: 'Unlink active note from card',
+	search_link_note: 'Search vault and link note',
+	create_link_note: 'Create note from card and link',
+	open_links_menu: 'Open linked notes menu',
+	open_anki_browser: 'Open card in Anki desktop browser',
+	sync_anki: 'Sync with AnkiWeb',
+	refresh_cards: 'Refresh cards from Anki',
+	deck_picker: 'Back to deck selection',
 	none: 'Disabled / None',
 };
 
@@ -128,9 +146,13 @@ export interface AnkiEmbedSettings {
 	cardAppendTarget: AnkiAppendTarget;
 	cardAppendCustomPath: string;
 	cardAppendHeading: string;
+	cardFontScale: number;
 	enableGamepad: boolean;
 	gamepadMapping: Record<number, RemoteAction>;
 	keyboardMapping: Record<string, RemoteAction>;
+	cardLinks: Record<string, string[]>;
+	enableCardLinks: boolean;
+	enableBacklinks: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -156,9 +178,13 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	cardAppendTarget: 'daily',
 	cardAppendCustomPath: 'Anki Notes.md',
 	cardAppendHeading: '## Anki Reviews',
+	cardFontScale: 1.0,
 	enableGamepad: true,
 	gamepadMapping: DEFAULT_GAMEPAD_MAPPING,
 	keyboardMapping: DEFAULT_KEYBOARD_MAPPING,
+	cardLinks: {},
+	enableCardLinks: true,
+	enableBacklinks: true,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -185,6 +211,11 @@ export interface DeckEmbedConfig {
 	flashDuration?: number;
 	flashTransition?: number;
 	remote?: boolean;
+	fontScale?: number;
+	scale?: number;
+	fontSize?: number;
+	links?: boolean;
+	backlinks?: boolean;
 	[key: string]: unknown;
 }
 

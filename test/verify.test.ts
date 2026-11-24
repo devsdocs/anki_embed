@@ -4,6 +4,14 @@ import { AnkiClient } from '../src/anki-client';
 import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from '../src/card-html';
 import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 
+// 3e. Test parseDeckConfig - links and backlinks config
+const configLinks = parseDeckConfig(`
+links: false
+backlinks: false
+`);
+assert.strictEqual(configLinks.links, false);
+assert.strictEqual(configLinks.backlinks, false);
+
 console.log('Running Anki Embed verification tests...');
 
 // 0. Test VIEW_TYPE_ANKI_EMBED constant
@@ -205,10 +213,26 @@ assert.strictEqual(configGamepad.remote, false);
 const configContanki = parseDeckConfig('contanki: yes');
 assert.strictEqual(configContanki.remote, true);
 
+const configScale = parseDeckConfig('scale: x1.2');
+assert.strictEqual(configScale.scale, 1.2);
+assert.strictEqual(configScale.fontScale, 1.2);
+
+const configFontScale = parseDeckConfig('font_scale: 1.5');
+assert.strictEqual(configFontScale.scale, 1.5);
+assert.strictEqual(configFontScale.fontScale, 1.5);
+
 const configFlashOff = parseDeckConfig('flash: false\nflash_duration: 0\nflash_transition: 10');
 assert.strictEqual(configFlashOff.flash, false);
 assert.strictEqual(configFlashOff.flashDuration, 0);
 assert.strictEqual(configFlashOff.flashTransition, 10);
+
+const configLinksOff = parseDeckConfig('links: false\nbacklinks: false');
+assert.strictEqual(configLinksOff.links, false);
+assert.strictEqual(configLinksOff.backlinks, false);
+
+const configLinksOn = parseDeckConfig('link: yes\nbacklink: true');
+assert.strictEqual(configLinksOn.links, true);
+assert.strictEqual(configLinksOn.backlinks, true);
 
 // 7. Test DeckEmbedConfig reset state
 const resetConfig = { ...config1, select: true, deck: undefined, query: undefined };
@@ -216,7 +240,7 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10, enableRatingFlash: true, ratingFlashDurationMs: 25, ratingFlashTransitionMs: 20, enableGamepad: true
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10, enableRatingFlash: true, ratingFlashDurationMs: 25, ratingFlashTransitionMs: 20, enableGamepad: true, enableCardLinks: true, enableBacklinks: true
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
@@ -232,6 +256,10 @@ assert.strictEqual(DEFAULT_SETTINGS.ratingFlashTransitionMs, 20);
 assert.strictEqual(DEFAULT_SETTINGS.cardAppendTarget, 'daily');
 assert.strictEqual(DEFAULT_SETTINGS.cardAppendCustomPath, 'Anki Notes.md');
 assert.strictEqual(DEFAULT_SETTINGS.cardAppendHeading, '## Anki Reviews');
+assert.strictEqual(DEFAULT_SETTINGS.cardFontScale, 1.0);
+assert.deepStrictEqual(DEFAULT_SETTINGS.cardLinks, {});
+assert.strictEqual(DEFAULT_SETTINGS.enableCardLinks, true);
+assert.strictEqual(DEFAULT_SETTINGS.enableBacklinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableGamepad, true);
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[0], 'flip_or_good');
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[4], 'undo');

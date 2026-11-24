@@ -127,6 +127,21 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 					config.cardId = num;
 				}
 				hasKeyValue = true;
+			} else if (key === 'font_scale' || key === 'fontscale' || key === 'scale' || key === 'fontsize' || key === 'font_size') {
+				const num = Number.parseFloat(val.replace(/[xX]/g, ''));
+				if (!Number.isNaN(num) && num > 0) {
+					config.fontScale = num;
+					config.scale = num;
+				}
+				hasKeyValue = true;
+			} else if (key === 'links' || key === 'link' || key === 'cardlinks' || key === 'card_links') {
+				const valLower = val.toLowerCase();
+				config.links = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
+			} else if (key === 'backlinks' || key === 'backlink') {
+				const valLower = val.toLowerCase();
+				config.backlinks = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
 			}
 		}
 	}
