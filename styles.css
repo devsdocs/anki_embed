@@ -459,19 +459,28 @@
 }
 
 .anki-embed-deck-toggle {
-	width: 14px;
-	height: 14px;
+	width: 16px;
+	height: 16px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	font-size: 0.75em;
-	color: var(--text-muted);
-	border-radius: 2px;
+	font-size: 0.88em;
+	font-weight: 700;
+	color: var(--text-normal);
+	opacity: 0.75;
+	border-radius: 3px;
 	flex-shrink: 0;
+	transition: opacity 0.15s ease, color 0.15s ease;
 }
 
 .anki-embed-deck-toggle:hover {
 	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+	opacity: 1;
+}
+
+.anki-embed-deck-row:hover .anki-embed-deck-toggle {
+	opacity: 1;
 }
 
 .anki-embed-deck-toggle.is-empty {
