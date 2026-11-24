@@ -187,18 +187,6 @@
 .anki-embed-answer {
 	width: 100%;
 	margin-top: 12px;
-	animation: anki-fade-in 0.25s ease-in-out;
-}
-
-@keyframes anki-fade-in {
-	from {
-		opacity: 0;
-		transform: translateY(4px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
-	}
 }
 
 /* Footer & Rating Buttons */
@@ -290,7 +278,6 @@
 	gap: 8px;
 	width: 100%;
 	min-width: 0;
-	animation: anki-fade-in 0.2s ease-in-out;
 }
 
 .anki-embed-rate-btn {

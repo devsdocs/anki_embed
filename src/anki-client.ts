@@ -363,6 +363,36 @@ export class AnkiClient {
 		}
 	}
 
+	public async multi<T extends unknown[]>(actions: Array<{ action: string; params?: Record<string, unknown> }>): Promise<T> {
+		return await this.request<T>('multi', { actions });
+	}
+
+	public async guiAnswerAndCurrentCard(ease: 1 | 2 | 3 | 4): Promise<AnkiCardInfo | null> {
+		try {
+			const res = await this.multi<[boolean, AnkiCardInfo | null]>([
+				{ action: 'guiAnswerCard', params: { ease } },
+				{ action: 'guiCurrentCard' },
+			]);
+			return res?.[1] ?? null;
+		} catch {
+			await this.guiAnswerCard(ease);
+			return await this.guiCurrentCard();
+		}
+	}
+
+	public async guiUndoAndCurrentCard(): Promise<AnkiCardInfo | null> {
+		try {
+			const res = await this.multi<[boolean, AnkiCardInfo | null]>([
+				{ action: 'guiUndo' },
+				{ action: 'guiCurrentCard' },
+			]);
+			return res?.[1] ?? null;
+		} catch {
+			await this.guiUndo();
+			return await this.guiCurrentCard();
+		}
+	}
+
 	// --- Media Endpoints ---
 
 	public async storeMediaFile(filename: string, options: { data?: string; path?: string; url?: string; deleteExisting?: boolean }): Promise<string> {

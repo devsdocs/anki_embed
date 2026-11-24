@@ -120,6 +120,7 @@ export class DeckPlayer {
 	private modelStyleCache = new Map<string, string>();
 	private normalizedStyleCache = new Map<string, string>();
 	private preparedQuestionCache = new Map<number, DocumentFragment>();
+	private preparedAnswerCache = new Map<number, DocumentFragment>();
 	private headerEl: HTMLElement | null = null;
 	private cardEl: HTMLElement | null = null;
 	private footerEl: HTMLElement | null = null;
@@ -131,6 +132,8 @@ export class DeckPlayer {
 	private activeLinksDropdown: HTMLElement | null = null;
 	private linksDropdownCleanup: (() => void) | null = null;
 	private isPollingLiveCard = false;
+	private isReviewingLiveCard = false;
+	private lastUserActionTimestamp = 0;
 	private loadRequestId = 0;
 	private cardStartTime: number = 0;
 	private liveSyncTimer: number | null = null;
@@ -660,7 +663,8 @@ export class DeckPlayer {
 
 		this.liveSyncTimer = window.setInterval(() => {
 			void (async () => {
-				if (!this.isLiveSync || this.isLoading || !this.hasStarted || this.isPollingLiveCard) return;
+				if (!this.isLiveSync || this.isLoading || !this.hasStarted || this.isPollingLiveCard || this.isReviewingLiveCard) return;
+				if (Date.now() - this.lastUserActionTimestamp < 1500) return;
 				if (!this.container.isConnected) {
 					this.stopLiveSyncWatcher();
 					return;
@@ -693,7 +697,8 @@ export class DeckPlayer {
 
 		this.onWindowFocusHandler = () => {
 			void (async () => {
-				if (!this.isLiveSync || this.isLoading || !this.hasStarted || this.isPollingLiveCard) return;
+				if (!this.isLiveSync || this.isLoading || !this.hasStarted || this.isPollingLiveCard || this.isReviewingLiveCard) return;
+				if (Date.now() - this.lastUserActionTimestamp < 1000) return;
 				this.isPollingLiveCard = true;
 				try {
 					const currentCard = await this.client.guiCurrentCard();
@@ -843,6 +848,7 @@ export class DeckPlayer {
 		this.currentModelName = null;
 		this.currentFontScale = null;
 		this.preparedQuestionCache.clear();
+		this.preparedAnswerCache.clear();
 		this.config.select = true;
 		this.config.deck = undefined;
 		this.config.query = undefined;
@@ -1113,20 +1119,25 @@ export class DeckPlayer {
 
 	private async undoLastCard(): Promise<void> {
 		if (this.isLiveSync) {
+			this.isReviewingLiveCard = true;
+			this.lastUserActionTimestamp = Date.now();
 			try {
-				await this.client.guiUndo();
 				new Notice('Undid last review in Anki');
-				const nextCard = await this.client.guiCurrentCard();
+				const nextCard = await this.client.guiUndoAndCurrentCard();
 				if (nextCard) {
 					this.cards = [nextCard];
 					this.currentIndex = 0;
 					this.showingAnswer = false;
-					await this.updateCounts(nextCard.deckName || this.config.deck);
 					await this.renderCurrentCard();
+					window.setTimeout(() => {
+						void this.updateCounts(nextCard.deckName || this.config.deck);
+					}, 20);
 				}
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				new Notice(`Failed to undo in Anki: ${msg}`);
+			} finally {
+				this.isReviewingLiveCard = false;
 			}
 			return;
 		}
@@ -2190,6 +2201,37 @@ export class DeckPlayer {
 		return await this.getResolvedMediaFragment(formatCardHtml(card.question));
 	}
 
+	private async getAnswerFragment(card: AnkiCardInfo): Promise<DocumentFragment> {
+		const cached = this.preparedAnswerCache.get(card.cardId);
+		if (cached) {
+			this.preparedAnswerCache.delete(card.cardId);
+			return cached.cloneNode(true) as DocumentFragment;
+		}
+		const isCloze = isClozeCard(card);
+		const answerHtml = isCloze
+			? formatCardHtml(card.answer, card.question)
+			: extractAnswerHtml(formatCardHtml(card.answer, card.question));
+		return await this.getResolvedMediaFragment(answerHtml);
+	}
+
+	private prepareAnswerFragment(card: AnkiCardInfo): void {
+		if (this.preparedAnswerCache.has(card.cardId)) return;
+		window.setTimeout(() => {
+			void (async () => {
+				try {
+					const isCloze = isClozeCard(card);
+					const answerHtml = isCloze
+						? formatCardHtml(card.answer, card.question)
+						: extractAnswerHtml(formatCardHtml(card.answer, card.question));
+					const frag = await this.getResolvedMediaFragment(answerHtml);
+					this.preparedAnswerCache.set(card.cardId, frag);
+				} catch {
+					// Background pre-resolve is non-fatal
+				}
+			})();
+		}, 0);
+	}
+
 	private preparseNextCard(): void {
 		if (this.isLiveSync || this.currentIndex + 1 >= this.cards.length) return;
 		const nextCard = this.cards[this.currentIndex + 1];
@@ -2273,11 +2315,11 @@ export class DeckPlayer {
 			const qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
 			const qFragment = await this.getQuestionFragment(card);
 			qDiv.appendChild(qFragment);
+			this.prepareAnswerFragment(card);
 		} else if (isCloze) {
 			cardContainer.empty();
 			const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer anki-embed-cloze-answer' });
-			const answerHtml = formatCardHtml(card.answer, card.question);
-			const aFragment = await this.getResolvedMediaFragment(answerHtml);
+			const aFragment = await this.getAnswerFragment(card);
 			aDiv.appendChild(aFragment);
 		} else {
 			let qDiv = cardContainer.querySelector<HTMLElement>('.anki-embed-question');
@@ -2290,8 +2332,7 @@ export class DeckPlayer {
 			if (!cardContainer.querySelector('.anki-embed-answer')) {
 				cardContainer.createEl('hr', { cls: 'anki-embed-separator' });
 				const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer' });
-				const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
-				const aFragment = await this.getResolvedMediaFragment(answerHtml);
+				const aFragment = await this.getAnswerFragment(card);
 				aDiv.appendChild(aFragment);
 			}
 		}
@@ -2492,7 +2533,6 @@ export class DeckPlayer {
 }
 .anki-embed-answer {
 	margin-top: 12px;
-	animation: anki-fade-in 0.25s ease-in-out;
 }
 .anki-embed-separator {
 	width: 80%;
@@ -2510,16 +2550,6 @@ img {
 	height: auto;
 	border-radius: 4px;
 	margin: 8px 0;
-}
-@keyframes anki-fade-in {
-	from {
-		opacity: 0;
-		transform: translateY(4px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
-	}
 }
 ${normalizedCss}
 
@@ -2602,6 +2632,7 @@ ${normalizedCss}
 	private async revealAnswer() {
 		this.showingAnswer = true;
 		if (this.isLiveSync) {
+			this.lastUserActionTimestamp = Date.now();
 			void this.client.guiShowAnswer().catch(() => {});
 		}
 		await this.renderCurrentCard();
@@ -2659,23 +2690,21 @@ ${normalizedCss}
 		}
 
 		if (this.isLiveSync) {
+			this.isReviewingLiveCard = true;
+			this.lastUserActionTimestamp = Date.now();
 			try {
 				if (!this.showingAnswer) {
 					await this.client.guiShowAnswer();
 				}
-				await this.client.guiAnswerCard(ease);
-			} catch (err) {
-				console.warn('Failed to answer card in Anki GUI:', err);
-			}
-
-			this.showingAnswer = false;
-			try {
-				const nextCard = await this.client.guiCurrentCard();
+				const nextCard = await this.client.guiAnswerAndCurrentCard(ease);
+				this.showingAnswer = false;
 				if (nextCard) {
 					this.cards = [nextCard];
 					this.currentIndex = 0;
-					void this.updateCounts(nextCard.deckName || this.config.deck);
 					await this.renderCurrentCard();
+					window.setTimeout(() => {
+						void this.updateCounts(nextCard.deckName || this.config.deck);
+					}, 20);
 				} else {
 					this.cards = [];
 					this.renderCompleted();
@@ -2688,6 +2717,8 @@ ${normalizedCss}
 				} else {
 					this.renderError(msg);
 				}
+			} finally {
+				this.isReviewingLiveCard = false;
 			}
 			return;
 		}
