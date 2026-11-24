@@ -1,6 +1,98 @@
 export type AnkiCardFilter = 'all' | 'due' | 'new' | 'due+new';
 export type AnkiCardOrder = 'reviews-first' | 'random' | 'default';
 
+export type RemoteAction =
+	| 'flip_or_good'
+	| 'flip_or_easy'
+	| 'flip_or_hard'
+	| 'flip_or_again'
+	| 'again'
+	| 'hard'
+	| 'good'
+	| 'easy'
+	| 'flip'
+	| 'undo'
+	| 'suspend'
+	| 'bury'
+	| 'flag'
+	| 'none';
+
+export const REMOTE_ACTION_LABELS: Record<RemoteAction, string> = {
+	flip_or_good: 'Flip / Rate Good',
+	flip_or_easy: 'Flip / Rate Easy',
+	flip_or_hard: 'Flip / Rate Hard',
+	flip_or_again: 'Flip / Rate Again',
+	again: 'Rate Again (1)',
+	hard: 'Rate Hard (2)',
+	good: 'Rate Good (3)',
+	easy: 'Rate Easy (4)',
+	flip: 'Flip card / Reveal answer',
+	undo: 'Undo last review',
+	suspend: 'Suspend card',
+	bury: 'Bury card',
+	flag: 'Toggle flag (Red)',
+	none: 'Disabled / None',
+};
+
+export const GAMEPAD_BUTTON_NAMES: Record<number, string> = {
+	0: 'Button 0 (A / Cross / South)',
+	1: 'Button 1 (B / Circle / East)',
+	2: 'Button 2 (X / Square / West)',
+	3: 'Button 3 (Y / Triangle / North)',
+	4: 'Button 4 (L1 / LB / Shoulder)',
+	5: 'Button 5 (R1 / RB / Shoulder)',
+	6: 'Button 6 (L2 / LT / Trigger)',
+	7: 'Button 7 (R2 / RT / Trigger)',
+	8: 'Button 8 (Select / Back / Share)',
+	9: 'Button 9 (Start / Options / Menu)',
+	10: 'Button 10 (L3 / Left Stick Click)',
+	11: 'Button 11 (R3 / Right Stick Click)',
+	12: 'Button 12 (D-Pad Up)',
+	13: 'Button 13 (D-Pad Down)',
+	14: 'Button 14 (D-Pad Left)',
+	15: 'Button 15 (D-Pad Right)',
+	16: 'Button 16 (Home / Guide)',
+};
+
+export const DEFAULT_GAMEPAD_MAPPING: Record<number, RemoteAction> = {
+	0: 'flip_or_good',
+	1: 'flip_or_easy',
+	2: 'flip_or_hard',
+	3: 'flip_or_again',
+	4: 'undo',
+	5: 'flip_or_good',
+	6: 'suspend',
+	7: 'bury',
+	8: 'undo',
+	9: 'suspend',
+	12: 'flag',
+	13: 'undo',
+	14: 'flip_or_again',
+	15: 'flip_or_good',
+};
+
+export const DEFAULT_KEYBOARD_MAPPING: Record<string, RemoteAction> = {
+	' ': 'flip_or_good',
+	'Enter': 'flip_or_good',
+	'1': 'again',
+	'2': 'hard',
+	'3': 'good',
+	'4': 'easy',
+	'j': 'flip_or_again',
+	'k': 'flip_or_hard',
+	'l': 'flip_or_good',
+	';': 'flip_or_easy',
+	'z': 'undo',
+	'u': 'undo',
+	's': 'suspend',
+	'@': 'suspend',
+	'!': 'suspend',
+	'b': 'bury',
+	'-': 'bury',
+	'f': 'flag',
+	'*': 'flag',
+};
+
 export interface AnkiEmbedSettings {
 	ankiConnectUrl: string;
 	apiKey: string;
@@ -18,6 +110,12 @@ export interface AnkiEmbedSettings {
 	enableCardTimer: boolean;
 	timerWarningSeconds: number;
 	timerLimitSeconds: number;
+	enableRatingFlash: boolean;
+	ratingFlashDurationMs: number;
+	ratingFlashTransitionMs: number;
+	enableGamepad: boolean;
+	gamepadMapping: Record<number, RemoteAction>;
+	keyboardMapping: Record<string, RemoteAction>;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -37,6 +135,12 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	enableCardTimer: false,
 	timerWarningSeconds: 5,
 	timerLimitSeconds: 10,
+	enableRatingFlash: true,
+	ratingFlashDurationMs: 25,
+	ratingFlashTransitionMs: 20,
+	enableGamepad: true,
+	gamepadMapping: DEFAULT_GAMEPAD_MAPPING,
+	keyboardMapping: DEFAULT_KEYBOARD_MAPPING,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -59,6 +163,10 @@ export interface DeckEmbedConfig {
 	timer?: boolean;
 	timerWarning?: number;
 	timerLimit?: number;
+	flash?: boolean;
+	flashDuration?: number;
+	flashTransition?: number;
+	remote?: boolean;
 	[key: string]: unknown;
 }
 
@@ -86,6 +194,7 @@ export interface AnkiCardInfo {
 	left?: number;
 	mod?: number;
 	note?: number;
+	flags?: number;
 	buttons?: number[];
 	nextReviews?: string[];
 }

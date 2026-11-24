@@ -5,8 +5,16 @@ import { AnkiView } from './src/anki-view';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
 import { AnkiImportModal } from './src/import-modal';
+import { AnkiRemoteConfigModal } from './src/remote-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
-import { AnkiEmbedSettings, DEFAULT_SETTINGS, DeckEmbedConfig, VIEW_TYPE_ANKI_EMBED } from './src/types';
+import {
+	AnkiEmbedSettings,
+	DEFAULT_GAMEPAD_MAPPING,
+	DEFAULT_KEYBOARD_MAPPING,
+	DEFAULT_SETTINGS,
+	DeckEmbedConfig,
+	VIEW_TYPE_ANKI_EMBED,
+} from './src/types';
 
 export default class AnkiEmbedPlugin extends Plugin {
 	settings!: AnkiEmbedSettings;
@@ -74,7 +82,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 				},
 				false,
 				undefined,
-				this.app
+				this.app,
+				async (updated) => {
+					await this.saveData(updated);
+				}
 			);
 			void player.init();
 		};
@@ -194,6 +205,14 @@ export default class AnkiEmbedPlugin extends Plugin {
 				new AnkiImportModal(this.app, this.client).open();
 			},
 		});
+
+		this.addCommand({
+			id: 'customize-anki-remote',
+			name: 'Customize Anki remote and controller buttons',
+			callback: () => {
+				new AnkiRemoteConfigModal(this.app, this).open();
+			},
+		});
 	}
 
 	async activateView(config?: DeckEmbedConfig, newTab: boolean = true): Promise<AnkiView> {
@@ -286,6 +305,30 @@ export default class AnkiEmbedPlugin extends Plugin {
 		}
 		if (typeof this.settings.timerLimitSeconds !== 'number' || this.settings.timerLimitSeconds <= 0) {
 			this.settings.timerLimitSeconds = DEFAULT_SETTINGS.timerLimitSeconds;
+			repaired = true;
+		}
+		if (typeof this.settings.enableRatingFlash !== 'boolean') {
+			this.settings.enableRatingFlash = DEFAULT_SETTINGS.enableRatingFlash;
+			repaired = true;
+		}
+		if (typeof this.settings.ratingFlashDurationMs !== 'number' || this.settings.ratingFlashDurationMs < 0) {
+			this.settings.ratingFlashDurationMs = DEFAULT_SETTINGS.ratingFlashDurationMs;
+			repaired = true;
+		}
+		if (typeof this.settings.ratingFlashTransitionMs !== 'number' || this.settings.ratingFlashTransitionMs < 0) {
+			this.settings.ratingFlashTransitionMs = DEFAULT_SETTINGS.ratingFlashTransitionMs;
+			repaired = true;
+		}
+		if (typeof this.settings.enableGamepad !== 'boolean') {
+			this.settings.enableGamepad = DEFAULT_SETTINGS.enableGamepad;
+			repaired = true;
+		}
+		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
+			this.settings.gamepadMapping = Object.assign({}, DEFAULT_GAMEPAD_MAPPING);
+			repaired = true;
+		}
+		if (!this.settings.keyboardMapping || typeof this.settings.keyboardMapping !== 'object') {
+			this.settings.keyboardMapping = Object.assign({}, DEFAULT_KEYBOARD_MAPPING);
 			repaired = true;
 		}
 
@@ -417,7 +460,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 					},
 					{
 						name: 'Timer warning threshold (seconds)',
-						desc: 'Time at which the timer turns red as a warning (default: 5s).',
+						desc: 'Time at which the timer turns yellow as a warning (default: 5s).',
 						control: {
 							type: 'slider',
 							key: 'timerWarningSeconds',
@@ -429,7 +472,7 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 					},
 					{
 						name: 'Timer limit threshold (seconds)',
-						desc: 'Time at which the timer turns grey and resets your streak (default: 10s).',
+						desc: 'Time at which the timer turns red and resets your streak (default: 10s).',
 						control: {
 							type: 'slider',
 							key: 'timerLimitSeconds',
@@ -437,6 +480,55 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							min: 2,
 							max: 120,
 							step: 1,
+						},
+					},
+					{
+						name: 'Flash rating button on selection',
+						desc: 'Briefly flash the selected rating button (Again, Hard, Good, Easy) for visual feedback when clicking, using keyboard, or using remote controls.',
+						control: {
+							type: 'toggle',
+							key: 'enableRatingFlash',
+							defaultValue: DEFAULT_SETTINGS.enableRatingFlash,
+						},
+					},
+					{
+						name: 'Rating button flash duration (ms)',
+						desc: 'Duration to hold the button flash effect before advancing to the next card (default: 25ms). Set to 0 for no delay.',
+						control: {
+							type: 'slider',
+							key: 'ratingFlashDurationMs',
+							defaultValue: DEFAULT_SETTINGS.ratingFlashDurationMs,
+							min: 0,
+							max: 200,
+							step: 5,
+						},
+					},
+					{
+						name: 'Rating button transition time (ms)',
+						desc: 'Animation transition duration for the button flash effect (default: 20ms).',
+						control: {
+							type: 'slider',
+							key: 'ratingFlashTransitionMs',
+							defaultValue: DEFAULT_SETTINGS.ratingFlashTransitionMs,
+							min: 0,
+							max: 100,
+							step: 5,
+						},
+					},
+					{
+						name: 'Enable Anki Remote and controller support',
+						desc: 'Support gamepads, 8BitDo Micro/Zero 2, and Bluetooth remotes (ContAnki style) for rating, flipping, undoing, and suspending.',
+						control: {
+							type: 'toggle',
+							key: 'enableGamepad',
+							defaultValue: DEFAULT_SETTINGS.enableGamepad,
+						},
+					},
+					{
+						name: 'Customize remote controls and test buttons',
+						desc: 'Test your connected gamepad or remote buttons in real time and customize review actions for each button.',
+						action: () => {
+							new AnkiRemoteConfigModal(this.app, this.plugin).open();
 						},
 					},
 					{

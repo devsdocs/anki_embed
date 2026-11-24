@@ -100,6 +100,26 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 					config.timerLimit = num;
 				}
 				hasKeyValue = true;
+			} else if (key === 'flash' || key === 'buttonflash' || key === 'button_flash') {
+				const valLower = val.toLowerCase();
+				config.flash = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
+			} else if (key === 'flash_duration' || key === 'flashduration') {
+				const num = Number.parseInt(val, 10);
+				if (!Number.isNaN(num) && num >= 0) {
+					config.flashDuration = num;
+				}
+				hasKeyValue = true;
+			} else if (key === 'flash_transition' || key === 'flashtransition') {
+				const num = Number.parseInt(val, 10);
+				if (!Number.isNaN(num) && num >= 0) {
+					config.flashTransition = num;
+				}
+				hasKeyValue = true;
+			} else if (key === 'remote' || key === 'gamepad' || key === 'controller' || key === 'contanki') {
+				const valLower = val.toLowerCase();
+				config.remote = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
 			} else if (key === 'card' || key === 'cardid' || key === 'cid') {
 				const num = Number.parseInt(val, 10);
 				if (!Number.isNaN(num) && num > 0) {

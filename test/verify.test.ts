@@ -193,6 +193,22 @@ assert.strictEqual(typeof client.storeMediaFile, 'function');
 assert.strictEqual(typeof client.retrieveMediaFile, 'function');
 assert.strictEqual(typeof client.getMediaFilesNames, 'function');
 assert.strictEqual(typeof client.sync, 'function');
+assert.strictEqual(typeof client.setSpecificValueOfCard, 'function');
+
+// 6b. Test parseDeckConfig - remote / gamepad / controller / contanki
+const configRemote = parseDeckConfig('remote: true');
+assert.strictEqual(configRemote.remote, true);
+
+const configGamepad = parseDeckConfig('gamepad: false');
+assert.strictEqual(configGamepad.remote, false);
+
+const configContanki = parseDeckConfig('contanki: yes');
+assert.strictEqual(configContanki.remote, true);
+
+const configFlashOff = parseDeckConfig('flash: false\nflash_duration: 0\nflash_transition: 10');
+assert.strictEqual(configFlashOff.flash, false);
+assert.strictEqual(configFlashOff.flashDuration, 0);
+assert.strictEqual(configFlashOff.flashTransition, 10);
 
 // 7. Test DeckEmbedConfig reset state
 const resetConfig = { ...config1, select: true, deck: undefined, query: undefined };
@@ -200,7 +216,7 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10, enableRatingFlash: true, ratingFlashDurationMs: 25, ratingFlashTransitionMs: 20, enableGamepad: true
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
@@ -210,6 +226,17 @@ assert.strictEqual(DEFAULT_SETTINGS.showHeatmap, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableCardTimer, false);
 assert.strictEqual(DEFAULT_SETTINGS.timerWarningSeconds, 5);
 assert.strictEqual(DEFAULT_SETTINGS.timerLimitSeconds, 10);
+assert.strictEqual(DEFAULT_SETTINGS.enableRatingFlash, true);
+assert.strictEqual(DEFAULT_SETTINGS.ratingFlashDurationMs, 25);
+assert.strictEqual(DEFAULT_SETTINGS.ratingFlashTransitionMs, 20);
+assert.strictEqual(DEFAULT_SETTINGS.enableGamepad, true);
+assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[0], 'flip_or_good');
+assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[4], 'undo');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['j'], 'flip_or_again');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['z'], 'undo');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['s'], 'suspend');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['b'], 'bury');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['f'], 'flag');
 
 console.log('✅ All verification tests passed successfully!');
 

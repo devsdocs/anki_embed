@@ -174,6 +174,10 @@ export class AnkiClient {
 		return await this.request<boolean>('unsuspend', { cards });
 	}
 
+	public async setSpecificValueOfCard(card: number, keys: string[], newValues: unknown[], warning_check: boolean = true): Promise<boolean> {
+		return await this.request<boolean>('setSpecificValueOfCard', { card, keys, newValues, warning_check });
+	}
+
 	public async areSuspended(cards: number[]): Promise<boolean[]> {
 		return await this.request<boolean[]>('areSuspended', { cards });
 	}
