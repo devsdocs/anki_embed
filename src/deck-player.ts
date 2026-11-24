@@ -1285,20 +1285,167 @@ ${normalizedCss}
 		await this.renderCurrentCard();
 	}
 
-	private cleanHtmlToText(html: string): string {
-		return html
+	private cleanHtmlToMarkdown(html: string): string {
+		if (!html) return '';
+
+		// Strip scripts, styles, tag containers, hints, and ankihub elements
+		let md = html
 			.replace(/<style[\s\S]*?<\/style>/gi, '')
 			.replace(/<script[\s\S]*?<\/script>/gi, '')
-			.replace(/<[^>]+>/g, ' ')
-			.replace(/\[\.\.\.\]/g, '___')
+			.replace(/<(?:div|span)\b[^>]*\b(?:id|class)\s*=\s*["']?[^"']*(?:tag|ankihub|hint|button|menu|reveal|toggle)[^"']*["'][^>]*>[\s\S]*?<\/(?:div|span)>/gi, '')
+			.replace(/<a\b[^>]*\bclass\s*=\s*["']?hint["'][^>]*>[\s\S]*?<\/a>/gi, '');
+
+		// Format basic HTML tags to Markdown
+		md = md
+			.replace(/<(?:b|strong)\b[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, '**$1**')
+			.replace(/<(?:i|em)\b[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, '*$1*')
+			.replace(/<u\b[^>]*>([\s\S]*?)<\/u>/gi, '_$1_')
+			.replace(/<sup\b[^>]*>([\s\S]*?)<\/sup>/gi, '$1')
+			.replace(/<sub\b[^>]*>([\s\S]*?)<\/sub>/gi, '$1')
+			.replace(/<br\s*\/?>/gi, '\n')
+			.replace(/<\/p>/gi, '\n\n')
+			.replace(/<p\b[^>]*>/gi, '')
+			.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n')
+			.replace(/<\/?(?:ul|ol)\b[^>]*>/gi, '\n');
+
+		// Remove any remaining HTML tags
+		md = md.replace(/<[^>]+>/g, '');
+
+		// Decode common HTML entities
+		md = md
 			.replace(/&nbsp;/gi, ' ')
 			.replace(/&amp;/gi, '&')
 			.replace(/&lt;/gi, '<')
 			.replace(/&gt;/gi, '>')
 			.replace(/&quot;/gi, '"')
 			.replace(/&#39;/gi, "'")
+			.replace(/&times;/gi, '×')
+			.replace(/&#8618;/gi, '↪');
+
+		// Strip AnKing pseudo-fields, button text, and tag clutter lines
+		md = md
+			.replace(/PSEUDO-FIELD[^\n]*/gi, '')
+			.replace(/Watch\s+[^\n]*/gi, '')
+			.replace(/View Note on AnkiHub/gi, '')
+			.replace(/Reveal Next/gi, '')
+			.replace(/Toggle All/gi, '')
+			.replace(/obsidian_exported[^\n]*/gi, '')
+			.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '')
+			.replace(/#AK_[^\s<>]+/g, '')
+			.replace(/#[\w/:-]{6,}/g, '');
+
+		return md
+			.split('\n')
+			.map(line => line.trim())
+			.filter((line, i, arr) => !(line === '' && arr[i - 1] === ''))
+			.join('\n')
+			.trim();
+	}
+
+	private renderClozeContent(text: string, targetOrd: number, isAnswer: boolean): string {
+		const targetIndex = targetOrd + 1;
+		const clozeRegex = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+
+		return text.replace(clozeRegex, (_match: string, numStr: string, answerText: string, hintText?: string): string => {
+			const num = Number.parseInt(numStr, 10);
+			if (num === targetIndex) {
+				if (isAnswer) {
+					return `**${(answerText ?? '').trim()}**`;
+				} else {
+					return hintText ? `**[${hintText.trim()}]**` : '**[...]**';
+				}
+			} else {
+				return (answerText ?? '').trim();
+			}
+		});
+	}
+
+	private extractTagsFromCard(card: AnkiCardInfo): string[] {
+		const raw = `${card.question} ${card.answer}`;
+		const tagMatches = raw.match(/#AK_[A-Za-z0-9_:#&/.-]+/g) || [];
+		const cleanedTags = new Set<string>();
+
+		for (const tag of tagMatches) {
+			const clean = tag.replace(/^#+/, '').replace(/::#+/g, '::').trim();
+			if (clean.length > 3) {
+				cleanedTags.add(clean);
+			}
+		}
+
+		return Array.from(cleanedTags);
+	}
+
+	private extractCardContent(card: AnkiCardInfo): {
+		question: string;
+		answer: string;
+		extra?: string;
+		lectureNotes?: string;
+		missedQuestions?: string;
+	} {
+		// 1. If Cloze card with Text field
+		if (card.fields?.Text?.value) {
+			const ord = card.ord ?? 0;
+			const rawText = card.fields.Text.value;
+			const qCloze = this.renderClozeContent(rawText, ord, false);
+			const aCloze = this.renderClozeContent(rawText, ord, true);
+
+			const extraVal = card.fields.Extra?.value ? this.cleanHtmlToMarkdown(card.fields.Extra.value) : undefined;
+			const lectureVal = card.fields['Lecture Notes']?.value ? this.cleanHtmlToMarkdown(card.fields['Lecture Notes'].value) : undefined;
+			const missedVal = card.fields['Missed Questions']?.value ? this.cleanHtmlToMarkdown(card.fields['Missed Questions'].value) : undefined;
+
+			return {
+				question: this.cleanHtmlToMarkdown(qCloze),
+				answer: this.cleanHtmlToMarkdown(aCloze),
+				extra: extraVal || undefined,
+				lectureNotes: lectureVal || undefined,
+				missedQuestions: missedVal || undefined,
+			};
+		}
+
+		// 2. If Basic card with Front and Back fields
+		if (card.fields?.Front?.value && card.fields?.Back?.value) {
+			const extraVal = card.fields.Extra?.value ? this.cleanHtmlToMarkdown(card.fields.Extra.value) : undefined;
+			return {
+				question: this.cleanHtmlToMarkdown(card.fields.Front.value),
+				answer: this.cleanHtmlToMarkdown(card.fields.Back.value),
+				extra: extraVal || undefined,
+			};
+		}
+
+		// 3. Fallback to parsing card.question and card.answer HTML
+		const rawQuestion = card.question || '';
+		let rawAnswer = card.answer || '';
+
+		const answerMarker = /<hr\b[^>]*\bid\s*=\s*["']?answer["']?[^>]*>/i;
+		const marker = rawAnswer.match(answerMarker);
+		if (marker && marker.index !== undefined) {
+			rawAnswer = rawAnswer.slice(marker.index + marker[0].length);
+		}
+
+		return {
+			question: this.cleanHtmlToMarkdown(rawQuestion),
+			answer: this.cleanHtmlToMarkdown(rawAnswer),
+		};
+	}
+
+	private generateCleanTitle(questionText: string, cardId: number): string {
+		const clean = questionText
+			.replace(/\*\*\[\.\.\.\]\*\*/g, '')
+			.replace(/\[\.\.\.\]/g, '')
+			.replace(/[*_#^[\]()]/g, ' ')
+			.replace(/[\\/:*?"<>|]/g, '')
 			.replace(/\s+/g, ' ')
 			.trim();
+
+		if (!clean) return `Anki Card ${cardId}`;
+		if (clean.length <= 60) return clean;
+
+		const slice = clean.slice(0, 60);
+		const lastSpace = slice.lastIndexOf(' ');
+		if (lastSpace > 25) {
+			return slice.slice(0, lastSpace).trim();
+		}
+		return slice.trim();
 	}
 
 	private showCardContextMenu(evt: MouseEvent, card: AnkiCardInfo) {
@@ -1307,8 +1454,8 @@ ${normalizedCss}
 
 		const menu = new Menu();
 
-		const rawTitle = card.fields?.Front?.value || card.question || `Card ${card.cardId}`;
-		const plainTitle = this.cleanHtmlToText(rawTitle).slice(0, 40) || `Card ${card.cardId}`;
+		const rawTitle = card.fields?.Front?.value || card.fields?.Text?.value || card.question || `Card ${card.cardId}`;
+		const plainTitle = this.generateCleanTitle(this.cleanHtmlToMarkdown(rawTitle), card.cardId);
 
 		menu.addItem((item) => {
 			item.setTitle('🔗 Copy link to card')
@@ -1362,23 +1509,34 @@ ${normalizedCss}
 		}
 
 		try {
-			const rawTitle = card.fields?.Front?.value || card.question || `Anki Card ${card.cardId}`;
-			const plainTitle = this.cleanHtmlToText(rawTitle)
-				.replace(/[\\/:*?"<>|#^[\]]/g, '')
-				.trim();
+			const content = this.extractCardContent(card);
+			const title = this.generateCleanTitle(content.question, card.cardId);
 
-			const titleSnippet = plainTitle.slice(0, 50).trim() || `Anki Card ${card.cardId}`;
-			let filename = `${titleSnippet}.md`;
-
+			let filename = `${title}.md`;
 			let counter = 1;
 			while (this.app.vault.getAbstractFileByPath(filename)) {
-				filename = `${titleSnippet} (${counter}).md`;
+				filename = `${title} (${counter}).md`;
 				counter++;
 			}
 
 			const deckName = card.deckName || this.config.deck || 'Anki';
-			const cleanQuestion = this.cleanHtmlToText(card.question);
-			const cleanAnswer = this.cleanHtmlToText(card.answer);
+			const tags = this.extractTagsFromCard(card);
+
+			let answerBody = content.answer;
+			if (content.extra) {
+				answerBody += `\n\n> [!info] Extra\n> ${content.extra.split('\n').join('\n> ')}`;
+			}
+			if (content.lectureNotes) {
+				answerBody += `\n\n> [!note] Lecture Notes\n> ${content.lectureNotes.split('\n').join('\n> ')}`;
+			}
+			if (content.missedQuestions) {
+				answerBody += `\n\n> [!warning] Missed Questions\n> ${content.missedQuestions.split('\n').join('\n> ')}`;
+			}
+
+			let tagsSection = '';
+			if (tags.length > 0) {
+				tagsSection = `\n---\n\n## Tags\n${tags.map(t => `- \`${t}\``).join('\n')}\n`;
+			}
 
 			const noteContent = `---
 anki-card-id: ${card.cardId}
@@ -1388,25 +1546,28 @@ tags:
   - anki
 ---
 
-# ${plainTitle.slice(0, 80)}
+# ${title}
 
-> [!info] Anki Card Details
-> **Deck**: ${deckName}
-> **Card ID**: \`${card.cardId}\`
-> [▶️ Review this card in Anki Embed](obsidian://anki-card?cardId=${card.cardId})
+## Question
+${content.question}
+
+## Answer
+${answerBody}
+
+## Personal Notes
+
+
+${tagsSection}
+---
+
+## Card Details
+- **Deck**: ${deckName}
+- **Card ID**: \`${card.cardId}\`
+- [▶️ Review this card in Anki Embed](obsidian://anki-card?cardId=${card.cardId})
 
 \`\`\`anki
 card: ${card.cardId}
 \`\`\`
-
-## Question
-${cleanQuestion}
-
-## Answer
-${cleanAnswer}
-
-## Personal Notes
-
 `;
 
 			const file = await this.app.vault.create(filename, noteContent);
