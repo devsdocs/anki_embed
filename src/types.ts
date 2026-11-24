@@ -15,6 +15,9 @@ export type RemoteAction =
 	| 'suspend'
 	| 'bury'
 	| 'flag'
+	| 'append_card_note'
+	| 'create_card_note'
+	| 'toggle_timer'
 	| 'none';
 
 export const REMOTE_ACTION_LABELS: Record<RemoteAction, string> = {
@@ -31,6 +34,9 @@ export const REMOTE_ACTION_LABELS: Record<RemoteAction, string> = {
 	suspend: 'Suspend card',
 	bury: 'Bury card',
 	flag: 'Toggle flag (Red)',
+	append_card_note: 'Append card Q&A to daily or target note',
+	create_card_note: 'Create new note from card',
+	toggle_timer: 'Pause / Resume timer',
 	none: 'Disabled / None',
 };
 
@@ -65,6 +71,8 @@ export const DEFAULT_GAMEPAD_MAPPING: Record<number, RemoteAction> = {
 	7: 'bury',
 	8: 'undo',
 	9: 'suspend',
+	10: 'append_card_note',
+	11: 'create_card_note',
 	12: 'flag',
 	13: 'undo',
 	14: 'flip_or_again',
@@ -91,7 +99,11 @@ export const DEFAULT_KEYBOARD_MAPPING: Record<string, RemoteAction> = {
 	'-': 'bury',
 	'f': 'flag',
 	'*': 'flag',
+	'c': 'create_card_note',
+	'a': 'append_card_note',
 };
+
+export type AnkiAppendTarget = 'daily' | 'custom';
 
 export interface AnkiEmbedSettings {
 	ankiConnectUrl: string;
@@ -113,6 +125,9 @@ export interface AnkiEmbedSettings {
 	enableRatingFlash: boolean;
 	ratingFlashDurationMs: number;
 	ratingFlashTransitionMs: number;
+	cardAppendTarget: AnkiAppendTarget;
+	cardAppendCustomPath: string;
+	cardAppendHeading: string;
 	enableGamepad: boolean;
 	gamepadMapping: Record<number, RemoteAction>;
 	keyboardMapping: Record<string, RemoteAction>;
@@ -138,6 +153,9 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	enableRatingFlash: true,
 	ratingFlashDurationMs: 25,
 	ratingFlashTransitionMs: 20,
+	cardAppendTarget: 'daily',
+	cardAppendCustomPath: 'Anki Notes.md',
+	cardAppendHeading: '## Anki Reviews',
 	enableGamepad: true,
 	gamepadMapping: DEFAULT_GAMEPAD_MAPPING,
 	keyboardMapping: DEFAULT_KEYBOARD_MAPPING,

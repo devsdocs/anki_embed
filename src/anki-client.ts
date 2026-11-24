@@ -300,19 +300,51 @@ export class AnkiClient {
 	}
 
 	public async guiCurrentCard(): Promise<AnkiCardInfo | null> {
-		return await this.request<AnkiCardInfo | null>('guiCurrentCard');
+		try {
+			return await this.request<AnkiCardInfo | null>('guiCurrentCard');
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				return null;
+			}
+			throw err;
+		}
 	}
 
 	public async guiShowQuestion(): Promise<boolean> {
-		return await this.request<boolean>('guiShowQuestion');
+		try {
+			return await this.request<boolean>('guiShowQuestion');
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				return false;
+			}
+			throw err;
+		}
 	}
 
 	public async guiShowAnswer(): Promise<boolean> {
-		return await this.request<boolean>('guiShowAnswer');
+		try {
+			return await this.request<boolean>('guiShowAnswer');
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				return false;
+			}
+			throw err;
+		}
 	}
 
 	public async guiAnswerCard(ease: 1 | 2 | 3 | 4): Promise<boolean> {
-		return await this.request<boolean>('guiAnswerCard', { ease });
+		try {
+			return await this.request<boolean>('guiAnswerCard', { ease });
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				return false;
+			}
+			throw err;
+		}
 	}
 
 	// --- Media Endpoints ---

@@ -1,4 +1,4 @@
-import { sanitizeHTMLToDom, Notice, Menu, setTooltip } from 'obsidian';
+import { sanitizeHTMLToDom, Notice, Menu, setTooltip, TFile } from 'obsidian';
 import type { App } from 'obsidian';
 import { AnkiClient } from './anki-client';
 import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from './card-html';
@@ -11,6 +11,76 @@ import {
 	DeckEmbedConfig,
 	RemoteAction,
 } from './types';
+
+interface DeckNode {
+	fullPath: string;
+	name: string;
+	children: DeckNode[];
+	level: number;
+}
+
+function buildDeckTree(deckNames: string[]): DeckNode[] {
+	const rootNodes: DeckNode[] = [];
+	const nodeMap = new Map<string, DeckNode>();
+
+	for (const fullName of deckNames) {
+		const parts = fullName.split('::');
+		let currentPath = '';
+
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i]!;
+			const prevPath = currentPath;
+			currentPath = currentPath ? `${currentPath}::${part}` : part;
+
+			if (!nodeMap.has(currentPath)) {
+				const node: DeckNode = {
+					fullPath: currentPath,
+					name: part,
+					children: [],
+					level: i,
+				};
+				nodeMap.set(currentPath, node);
+
+				if (i === 0) {
+					rootNodes.push(node);
+				} else {
+					const parentNode = nodeMap.get(prevPath);
+					if (parentNode) {
+						parentNode.children.push(node);
+					}
+				}
+			}
+		}
+	}
+
+	return rootNodes;
+}
+
+function filterDeckTree(nodes: DeckNode[], query: string, expandedDecks: Set<string>): DeckNode[] {
+	if (!query) return nodes;
+	const lower = query.toLowerCase();
+
+	const filterList = (list: DeckNode[]): DeckNode[] => {
+		const filtered: DeckNode[] = [];
+		for (const node of list) {
+			const selfMatch = node.name.toLowerCase().includes(lower) || node.fullPath.toLowerCase().includes(lower);
+			const matchingChildren = filterList(node.children);
+
+			if (selfMatch || matchingChildren.length > 0) {
+				expandedDecks.add(node.fullPath);
+				filtered.push({
+					fullPath: node.fullPath,
+					name: node.name,
+					children: matchingChildren,
+					level: node.level,
+				});
+			}
+		}
+		return filtered;
+	};
+
+	return filterList(nodes);
+}
 
 export class DeckPlayer {
 	private container: HTMLElement;
@@ -35,6 +105,8 @@ export class DeckPlayer {
 	private cardTimerInterval: number | null = null;
 	private timeStreak: number = 0;
 	private timerExceededForCurrentCard: boolean = false;
+	private isTimerPaused: boolean = false;
+	private timerPausedElapsedMs: number = 0;
 	private reviewHistory: Array<{
 		card: AnkiCardInfo;
 		index: number;
@@ -437,6 +509,11 @@ export class DeckPlayer {
 			if (requestId !== this.loadRequestId) return;
 			this.isLoading = false;
 			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				this.cards = [];
+				this.renderEmptyLive();
+				return;
+			}
 			this.renderError(msg);
 		}
 	}
@@ -450,10 +527,10 @@ export class DeckPlayer {
 
 		const hint = body.createDiv({ cls: 'anki-embed-empty-hint', attr: { style: 'margin-top: 8px; font-size: 0.9em; opacity: 0.8;' } });
 		hint.setText(this.config.deck
-			? `Start reviewing "${this.config.deck}" in Anki or click below:`
-			: 'Open a deck for review in Anki desktop to mirror it here.');
+			? `Start reviewing "${this.config.deck}" in Anki or choose an option below:`
+			: 'Open a deck for review in Anki desktop to mirror it here, or switch to offline mode:');
 
-		const actions = body.createDiv({ cls: 'anki-embed-actions', attr: { style: 'margin-top: 14px; justify-content: center;' } });
+		const actions = body.createDiv({ cls: 'anki-embed-actions', attr: { style: 'margin-top: 14px; justify-content: center; gap: 8px; flex-wrap: wrap;' } });
 		if (this.config.deck) {
 			const startAnkiBtn = actions.createEl('button', {
 				cls: 'anki-embed-flip-btn',
@@ -466,7 +543,7 @@ export class DeckPlayer {
 						void this.loadCards();
 					} catch (err: unknown) {
 						const msg = err instanceof Error ? err.message : String(err);
-						this.renderError(msg);
+						new Notice(`Could not launch deck in Anki: ${msg}`);
 					}
 				}
 			};
@@ -486,7 +563,16 @@ export class DeckPlayer {
 		});
 		toggleOffBtn.onclick = () => {
 			this.config.live = false;
+			this.hasStarted = true;
 			void this.loadCards();
+		};
+
+		const pickerBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: '↩ Back to deck selection',
+		});
+		pickerBtn.onclick = () => {
+			this.resetToDeckPicker();
 		};
 	}
 
@@ -597,8 +683,46 @@ export class DeckPlayer {
 		}
 	}
 
-	private startCardTimer(timerPill: HTMLElement, timerTextEl: HTMLElement, streakEl: HTMLElement) {
+	private getCardElapsedSec(): number {
+		if (this.isTimerPaused) {
+			return this.timerPausedElapsedMs / 1000;
+		}
+		if (this.cardStartTime > 0) {
+			return (Date.now() - this.cardStartTime) / 1000;
+		}
+		return 0;
+	}
+
+	private toggleTimerPause(timerPill: HTMLElement, clockEl: HTMLElement, timerTextEl: HTMLElement, streakEl: HTMLElement) {
+		const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+
+		if (!this.isTimerPaused) {
+			this.isTimerPaused = true;
+			this.timerPausedElapsedMs = this.cardStartTime > 0 ? (Date.now() - this.cardStartTime) : 0;
+			this.stopCardTimer();
+			timerPill.removeClass('is-normal');
+			timerPill.removeClass('is-warning');
+			timerPill.removeClass('is-overtime');
+			timerPill.addClass('is-paused');
+			clockEl.setText('⏸️');
+			timerPill.setAttribute('title', 'Timer paused (click to resume)');
+			timerTextEl.setText(`${(this.timerPausedElapsedMs / 1000).toFixed(1)}s`);
+		} else {
+			this.isTimerPaused = false;
+			this.cardStartTime = Date.now() - this.timerPausedElapsedMs;
+			timerPill.removeClass('is-paused');
+			clockEl.setText('⏱️');
+			timerPill.setAttribute('title', `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s (click to pause)`);
+			this.startCardTimer(timerPill, clockEl, timerTextEl, streakEl);
+		}
+	}
+
+	private startCardTimer(timerPill: HTMLElement, clockEl: HTMLElement, timerTextEl: HTMLElement, streakEl: HTMLElement) {
 		this.stopCardTimer();
+		if (this.isTimerPaused) {
+			return;
+		}
 		const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
 		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
 
@@ -607,13 +731,17 @@ export class DeckPlayer {
 				this.stopCardTimer();
 				return;
 			}
+			if (this.isTimerPaused) {
+				return;
+			}
 
-			const elapsedSec = this.cardStartTime > 0 ? (Date.now() - this.cardStartTime) / 1000 : 0;
+			const elapsedSec = this.getCardElapsedSec();
 			timerTextEl.setText(`${elapsedSec.toFixed(1)}s`);
 
 			if (elapsedSec >= limitSec) {
 				timerPill.removeClass('is-normal');
 				timerPill.removeClass('is-warning');
+				timerPill.removeClass('is-paused');
 				timerPill.addClass('is-overtime');
 
 				if (!this.timerExceededForCurrentCard) {
@@ -624,10 +752,12 @@ export class DeckPlayer {
 			} else if (elapsedSec >= warningSec) {
 				timerPill.removeClass('is-normal');
 				timerPill.removeClass('is-overtime');
+				timerPill.removeClass('is-paused');
 				timerPill.addClass('is-warning');
 			} else {
 				timerPill.removeClass('is-warning');
 				timerPill.removeClass('is-overtime');
+				timerPill.removeClass('is-paused');
 				timerPill.addClass('is-normal');
 			}
 		}, 100);
@@ -636,12 +766,16 @@ export class DeckPlayer {
 	public destroy(): void {
 		this.stopLiveSyncWatcher();
 		this.stopCardTimer();
+		this.isTimerPaused = false;
+		this.timerPausedElapsedMs = 0;
 		this.stopGamepadLoop();
 	}
 
 	public resetToDeckPicker(): void {
 		this.stopLiveSyncWatcher();
 		this.stopCardTimer();
+		this.isTimerPaused = false;
+		this.timerPausedElapsedMs = 0;
 		this.timeStreak = 0;
 		this.timerExceededForCurrentCard = false;
 		this.reviewHistory = [];
@@ -826,6 +960,27 @@ export class DeckPlayer {
 			case 'flag':
 				void this.toggleFlagCurrentCard();
 				break;
+			case 'append_card_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.appendCardToNote(currentCard);
+				}
+				break;
+			}
+			case 'create_card_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.createNoteFromCard(currentCard);
+				}
+				break;
+			}
+			case 'toggle_timer': {
+				const pill = this.container.querySelector<HTMLElement>('.anki-embed-timer-pill');
+				if (pill) {
+					pill.click();
+				}
+				break;
+			}
 			case 'none':
 			default:
 				break;
@@ -982,7 +1137,7 @@ export class DeckPlayer {
 		this.renderHeader('Select deck', false, true);
 
 		const pickerDiv = this.container.createDiv({ cls: 'anki-embed-picker' });
-		pickerDiv.createDiv({ cls: 'anki-embed-picker-title', text: '📚 Choose an Anki deck to review' });
+		pickerDiv.createDiv({ cls: 'anki-embed-picker-title', text: 'Select deck to review' });
 
 		try {
 			const decks = await this.client.getDeckNames();
@@ -992,64 +1147,184 @@ export class DeckPlayer {
 				return;
 			}
 
+			const statsMap = new Map<string, { new: number; learn: number; review: number }>();
+			try {
+				const statsRecord = await this.client.getDeckStats(decks);
+				if (statsRecord && typeof statsRecord === 'object') {
+					for (const stat of Object.values(statsRecord)) {
+						if (stat && stat.name) {
+							statsMap.set(stat.name, {
+								new: stat.new_count ?? 0,
+								learn: stat.learn_count ?? 0,
+								review: stat.review_count ?? 0,
+							});
+						}
+					}
+				}
+			} catch {
+				// Fallback to empty counts if stats fail
+			}
+
+			const deckTree = buildDeckTree(decks);
+
 			const searchInput = pickerDiv.createEl('input', {
 				cls: 'anki-embed-search-input',
-				attr: { placeholder: '🔍 Search decks...' },
+				attr: { placeholder: 'Search decks...' },
 			});
 
-			const selectEl = pickerDiv.createEl('select', { cls: 'anki-embed-select' });
+			const treeContainer = pickerDiv.createDiv({ cls: 'anki-embed-deck-tree' });
 
 			const startBtn = pickerDiv.createEl('button', {
 				cls: 'anki-embed-flip-btn',
 				text: 'Start review',
 			});
 
-			const populateOptions = (filterText: string) => {
-				selectEl.empty();
-				const lower = filterText.trim().toLowerCase();
-				const filtered = decks.filter(d => d.toLowerCase().includes(lower));
+			const expandedDecks = new Set<string>();
+			if (this.config.deck) {
+				const parts = this.config.deck.split('::');
+				let path = '';
+				for (let i = 0; i < parts.length - 1; i++) {
+					path = path ? `${path}::${parts[i]}` : parts[i]!;
+					expandedDecks.add(path);
+				}
+			}
 
-				if (filtered.length === 0) {
-					const emptyOpt = selectEl.createEl('option', {
-						value: '',
-						text: 'No matching decks found',
-					});
-					emptyOpt.disabled = true;
-					selectEl.size = 2;
+			let selectedDeck = this.config.deck || '';
+
+			const updateStartButton = () => {
+				if (!selectedDeck) {
 					startBtn.disabled = true;
+					startBtn.setText('Select a deck to start');
+					startBtn.removeAttribute('title');
 				} else {
 					startBtn.disabled = false;
-					for (const deck of filtered) {
-						selectEl.createEl('option', { value: deck, text: deck });
+					const displayName = selectedDeck.split('::').pop() ?? selectedDeck;
+					startBtn.setText(`Start review: ${displayName}`);
+					startBtn.setAttribute('title', `Start review with ${selectedDeck}`);
+				}
+			};
+
+			const renderNode = (node: DeckNode) => {
+				const hasChildren = node.children.length > 0;
+				const isExpanded = expandedDecks.has(node.fullPath);
+				const isSelected = selectedDeck === node.fullPath;
+
+				const row = treeContainer.createDiv({
+					cls: `anki-embed-deck-row ${isSelected ? 'is-selected' : ''}`,
+					attr: {
+						'data-level': String(node.level),
+						title: node.fullPath,
+					},
+				});
+
+				const toggleEl = row.createSpan({
+					cls: `anki-embed-deck-toggle ${hasChildren ? '' : 'is-empty'}`,
+					text: hasChildren ? (isExpanded ? '▾' : '▸') : '',
+				});
+
+				if (hasChildren) {
+					toggleEl.onclick = (e) => {
+						e.stopPropagation();
+						if (expandedDecks.has(node.fullPath)) {
+							expandedDecks.delete(node.fullPath);
+						} else {
+							expandedDecks.add(node.fullPath);
+						}
+						renderTree(searchInput.value);
+					};
+				}
+
+				row.createSpan({
+					cls: 'anki-embed-deck-name',
+					text: node.name,
+				});
+
+				const counts = statsMap.get(node.fullPath) ?? { new: 0, learn: 0, review: 0 };
+				const countsContainer = row.createDiv({ cls: 'anki-deck-counts' });
+
+				const newSpan = countsContainer.createSpan({
+					cls: `anki-deck-count is-new ${counts.new === 0 ? 'is-zero' : ''}`,
+					text: String(counts.new),
+				});
+				setTooltip(newSpan, `${counts.new} new`);
+
+				const learnSpan = countsContainer.createSpan({
+					cls: `anki-deck-count is-learn ${counts.learn === 0 ? 'is-zero' : ''}`,
+					text: String(counts.learn),
+				});
+				setTooltip(learnSpan, `${counts.learn} learn`);
+
+				const reviewSpan = countsContainer.createSpan({
+					cls: `anki-deck-count is-review ${counts.review === 0 ? 'is-zero' : ''}`,
+					text: String(counts.review),
+				});
+				setTooltip(reviewSpan, `${counts.review} due`);
+
+				row.onclick = () => {
+					selectedDeck = node.fullPath;
+					if (hasChildren) {
+						if (expandedDecks.has(node.fullPath)) {
+							expandedDecks.delete(node.fullPath);
+						} else {
+							expandedDecks.add(node.fullPath);
+						}
 					}
-					selectEl.size = Math.min(8, Math.max(4, filtered.length));
-					if (this.config.deck && filtered.includes(this.config.deck)) {
-						selectEl.value = this.config.deck;
-					} else if (filtered.length > 0) {
-						selectEl.selectedIndex = 0;
+					renderTree(searchInput.value);
+					updateStartButton();
+				};
+
+				row.ondblclick = () => {
+					selectedDeck = node.fullPath;
+					startBtn.click();
+				};
+
+				if (hasChildren && isExpanded) {
+					for (const child of node.children) {
+						renderNode(child);
 					}
 				}
 			};
 
-			populateOptions('');
+			const renderTree = (query: string = '') => {
+				treeContainer.empty();
+				const filteredTree = filterDeckTree(deckTree, query.trim(), expandedDecks);
+
+				if (filteredTree.length === 0) {
+					treeContainer.createDiv({
+						cls: 'anki-embed-empty',
+						text: 'No matching decks found',
+					});
+					selectedDeck = '';
+					updateStartButton();
+					return;
+				}
+
+				const isCurrentVisible = selectedDeck && decks.some(d => d === selectedDeck && (
+					!query.trim() || d.toLowerCase().includes(query.trim().toLowerCase())
+				));
+				if (query.trim() && (!selectedDeck || !isCurrentVisible)) {
+					selectedDeck = filteredTree[0]?.fullPath ?? '';
+				}
+
+				for (const rootNode of filteredTree) {
+					renderNode(rootNode);
+				}
+				updateStartButton();
+			};
+
+			renderTree('');
+			updateStartButton();
 
 			searchInput.oninput = () => {
-				populateOptions(searchInput.value);
-			};
-
-			selectEl.ondblclick = () => {
-				if (selectEl.value) {
-					startBtn.click();
-				}
+				renderTree(searchInput.value);
 			};
 
 			startBtn.onclick = () => {
-				const chosen = selectEl.value;
-				if (chosen) {
-					this.config.deck = chosen;
+				if (selectedDeck) {
+					this.config.deck = selectedDeck;
 					this.config.select = false;
 					this.hasStarted = true;
-					this.onDeckChange?.(chosen);
+					this.onDeckChange?.(selectedDeck);
 					void this.loadCards();
 				}
 			};
@@ -1354,12 +1629,34 @@ export class DeckPlayer {
 		steps.createEl('li', { text: '2. Ensure the AnkiConnect add-on (code 2055492159) is installed in Anki.' });
 		steps.createEl('li', { text: '3. Verify the AnkiConnect URL in plugin settings.' });
 
-		const retryBtn = errDiv.createEl('button', {
+		const actions = errDiv.createDiv({ cls: 'anki-embed-actions', attr: { style: 'margin-top: 14px; justify-content: center; gap: 8px; flex-wrap: wrap;' } });
+
+		const retryBtn = actions.createEl('button', {
 			cls: 'anki-embed-flip-btn',
 			text: '🔄 Retry connection',
 		});
 		retryBtn.onclick = () => {
 			void this.loadCards();
+		};
+
+		if (this.isLiveSync) {
+			const offlineBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary',
+				text: 'Switch to offline mode',
+			});
+			offlineBtn.onclick = () => {
+				this.config.live = false;
+				this.hasStarted = true;
+				void this.loadCards();
+			};
+		}
+
+		const pickerBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: '↩ Back to deck selection',
+		});
+		pickerBtn.onclick = () => {
+			this.resetToDeckPicker();
 		};
 	}
 
@@ -1420,13 +1717,15 @@ export class DeckPlayer {
 				const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
 				const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
 				const timerPill = titleContainer.createDiv({
-					cls: 'anki-embed-timer-pill is-normal',
+					cls: `anki-embed-timer-pill ${this.isTimerPaused ? 'is-paused' : 'is-normal'}`,
 					attr: {
-						title: `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s`,
+						title: this.isTimerPaused
+							? 'Timer paused (click to resume)'
+							: `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s (click to pause)`,
 					},
 				});
-				timerPill.createSpan({ cls: 'anki-timer-clock', text: '⏱️' });
-				const elapsedSoFar = this.cardStartTime > 0 ? (Date.now() - this.cardStartTime) / 1000 : 0;
+				const clockEl = timerPill.createSpan({ cls: 'anki-timer-clock', text: this.isTimerPaused ? '⏸️' : '⏱️' });
+				const elapsedSoFar = this.getCardElapsedSec();
 				const timerTextEl = timerPill.createSpan({
 					cls: 'anki-timer-seconds',
 					text: `${elapsedSoFar.toFixed(1)}s`,
@@ -1437,7 +1736,11 @@ export class DeckPlayer {
 					attr: { title: `Time limit streak: ${this.timeStreak} cards in a row under limit` },
 				});
 
-				this.startCardTimer(timerPill, timerTextEl, streakEl);
+				timerPill.onclick = () => {
+					this.toggleTimerPause(timerPill, clockEl, timerTextEl, streakEl);
+				};
+
+				this.startCardTimer(timerPill, clockEl, timerTextEl, streakEl);
 			}
 		}
 
@@ -1600,7 +1903,7 @@ export class DeckPlayer {
 				await this.client.guiDeckReview(deckToOpen);
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				this.renderError(msg);
+				new Notice(`Could not open deck in Anki: ${msg}`);
 			}
 		}
 	}
@@ -1755,6 +2058,8 @@ export class DeckPlayer {
 
 		if (!this.showingAnswer) {
 			this.cardStartTime = Date.now();
+			this.isTimerPaused = false;
+			this.timerPausedElapsedMs = 0;
 			this.timerExceededForCurrentCard = false;
 		}
 
@@ -2006,7 +2311,9 @@ ${normalizedCss}
 			}
 		}
 
-		const timeTaken = this.cardStartTime > 0 ? Date.now() - this.cardStartTime : undefined;
+		const timeTaken = this.isTimerPaused
+			? this.timerPausedElapsedMs
+			: (this.cardStartTime > 0 ? Date.now() - this.cardStartTime : undefined);
 		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
 		const prevTimeStreak = this.timeStreak;
 
@@ -2020,6 +2327,8 @@ ${normalizedCss}
 		}
 		this.stopCardTimer();
 		this.cardStartTime = 0;
+		this.isTimerPaused = false;
+		this.timerPausedElapsedMs = 0;
 
 		if (ease === 1) this.sessionStats.again++;
 		else if (ease === 2) this.sessionStats.hard++;
@@ -2058,7 +2367,12 @@ ${normalizedCss}
 				}
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				this.renderError(msg);
+				if (msg.toLowerCase().includes('not currently active')) {
+					this.cards = [];
+					this.renderCompleted();
+				} else {
+					this.renderError(msg);
+				}
 			}
 			return;
 		}
@@ -2326,6 +2640,14 @@ ${normalizedCss}
 		menu.addSeparator();
 
 		menu.addItem((item) => {
+			item.setTitle('Append card to daily or target note')
+				.setIcon('file-text')
+				.onClick(() => {
+					void this.appendCardToNote(card);
+				});
+		});
+
+		menu.addItem((item) => {
 			item.setTitle('Create Obsidian note from card')
 				.setIcon('file-plus')
 				.onClick(() => {
@@ -2474,7 +2796,100 @@ card: ${card.cardId}
 			await leaf.openFile(file);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			new Notice(`❌ Failed to create note: ${msg}`);
+			new Notice(`Failed to create note: ${msg}`);
+		}
+	}
+
+	private async appendCardToNote(card: AnkiCardInfo): Promise<void> {
+		if (!this.app) {
+			new Notice('Cannot append card: Obsidian app reference not available.');
+			return;
+		}
+
+		try {
+			const content = this.extractCardContent(card);
+			const title = this.generateCleanTitle(content.question, card.cardId);
+			const deckName = card.deckName || this.config.deck || 'Anki';
+			const tags = this.extractTagsFromCard(card);
+
+			let answerBody = content.answer;
+			if (content.extra) {
+				answerBody += `\n\n> [!info] Extra\n> ${content.extra.split('\n').join('\n> ')}`;
+			}
+			if (content.lectureNotes) {
+				answerBody += `\n\n> [!note] Lecture Notes\n> ${content.lectureNotes.split('\n').join('\n> ')}`;
+			}
+			if (content.missedQuestions) {
+				answerBody += `\n\n> [!warning] Missed Questions\n> ${content.missedQuestions.split('\n').join('\n> ')}`;
+			}
+
+			let targetPath = '';
+			const appendTarget = this.settings.cardAppendTarget ?? 'daily';
+
+			if (appendTarget === 'daily') {
+				const internalPlugins = (this.app as unknown as { internalPlugins?: { plugins?: Record<string, { instance?: { options?: { format?: string; folder?: string } } }> } }).internalPlugins;
+				const dailyNotesPlugin = internalPlugins?.plugins?.['daily-notes'];
+				const dailyOptions = dailyNotesPlugin?.instance?.options;
+				const momentFn = (window as unknown as { moment?: (date?: Date) => { format: (fmt: string) => string } }).moment;
+				let dateStr = '';
+				if (typeof momentFn === 'function') {
+					dateStr = momentFn().format(dailyOptions?.format || 'YYYY-MM-DD');
+				} else {
+					const now = new Date();
+					const y = now.getFullYear();
+					const m = String(now.getMonth() + 1).padStart(2, '0');
+					const d = String(now.getDate()).padStart(2, '0');
+					dateStr = `${y}-${m}-${d}`;
+				}
+				const folder = (dailyOptions?.folder || '').trim().replace(/\/+$/, '');
+				targetPath = folder ? `${folder}/${dateStr}.md` : `${dateStr}.md`;
+			} else {
+				targetPath = (this.settings.cardAppendCustomPath || 'Anki Notes.md').trim();
+				if (!targetPath.endsWith('.md')) {
+					targetPath += '.md';
+				}
+			}
+
+			const tagLine = tags.length > 0 ? `\n> **Tags**: ${tags.map(t => `#${t.replace(/\s+/g, '_')}`).join(' ')}` : '';
+			const cardSnippet = `### ${title}\n> [!quote] Question\n> ${content.question.split('\n').join('\n> ')}\n> \n> > [!success]- Answer\n> > ${answerBody.split('\n').join('\n> > ')}${tagLine ? '\n>' + tagLine : ''}\n> \n> *Deck: ${deckName}* | [Review card in Anki Embed](obsidian://anki-card?cardId=${card.cardId})\n`;
+
+			const heading = (this.settings.cardAppendHeading || '## Anki Reviews').trim();
+
+			const targetFile = this.app.vault.getAbstractFileByPath(targetPath);
+			if (!targetFile) {
+				const lastSlash = targetPath.lastIndexOf('/');
+				if (lastSlash > 0) {
+					const folderPath = targetPath.slice(0, lastSlash);
+					if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+						await this.app.vault.createFolder(folderPath);
+					}
+				}
+				const initialContent = heading ? `${heading}\n\n${cardSnippet}\n` : `${cardSnippet}\n`;
+				await this.app.vault.create(targetPath, initialContent);
+				new Notice(`Appended card to ${targetPath}`);
+				return;
+			}
+
+			if (targetFile instanceof TFile) {
+				const existingContent = await this.app.vault.read(targetFile);
+				let newContent = '';
+
+				if (heading && existingContent.includes(heading)) {
+					const headingIdx = existingContent.indexOf(heading);
+					const afterHeading = headingIdx + heading.length;
+					newContent = existingContent.slice(0, afterHeading) + '\n\n' + cardSnippet + existingContent.slice(afterHeading);
+				} else if (heading) {
+					newContent = existingContent.trimEnd() + '\n\n' + heading + '\n\n' + cardSnippet + '\n';
+				} else {
+					newContent = existingContent.trimEnd() + '\n\n' + cardSnippet + '\n';
+				}
+
+				await this.app.vault.modify(targetFile, newContent);
+				new Notice(`Appended card to ${targetFile.basename}`);
+			}
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to append card: ${msg}`);
 		}
 	}
 

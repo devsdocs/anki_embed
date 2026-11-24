@@ -229,14 +229,21 @@ assert.strictEqual(DEFAULT_SETTINGS.timerLimitSeconds, 10);
 assert.strictEqual(DEFAULT_SETTINGS.enableRatingFlash, true);
 assert.strictEqual(DEFAULT_SETTINGS.ratingFlashDurationMs, 25);
 assert.strictEqual(DEFAULT_SETTINGS.ratingFlashTransitionMs, 20);
+assert.strictEqual(DEFAULT_SETTINGS.cardAppendTarget, 'daily');
+assert.strictEqual(DEFAULT_SETTINGS.cardAppendCustomPath, 'Anki Notes.md');
+assert.strictEqual(DEFAULT_SETTINGS.cardAppendHeading, '## Anki Reviews');
 assert.strictEqual(DEFAULT_SETTINGS.enableGamepad, true);
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[0], 'flip_or_good');
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[4], 'undo');
+assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[10], 'append_card_note');
+assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[11], 'create_card_note');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['j'], 'flip_or_again');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['z'], 'undo');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['s'], 'suspend');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['b'], 'bury');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['f'], 'flag');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['c'], 'create_card_note');
+assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['a'], 'append_card_note');
 
 console.log('✅ All verification tests passed successfully!');
 

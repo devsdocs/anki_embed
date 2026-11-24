@@ -319,6 +319,18 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.ratingFlashTransitionMs = DEFAULT_SETTINGS.ratingFlashTransitionMs;
 			repaired = true;
 		}
+		if (!['daily', 'custom'].includes(this.settings.cardAppendTarget)) {
+			this.settings.cardAppendTarget = DEFAULT_SETTINGS.cardAppendTarget;
+			repaired = true;
+		}
+		if (typeof this.settings.cardAppendCustomPath !== 'string') {
+			this.settings.cardAppendCustomPath = DEFAULT_SETTINGS.cardAppendCustomPath;
+			repaired = true;
+		}
+		if (typeof this.settings.cardAppendHeading !== 'string') {
+			this.settings.cardAppendHeading = DEFAULT_SETTINGS.cardAppendHeading;
+			repaired = true;
+		}
 		if (typeof this.settings.enableGamepad !== 'boolean') {
 			this.settings.enableGamepad = DEFAULT_SETTINGS.enableGamepad;
 			repaired = true;
@@ -513,6 +525,37 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							min: 0,
 							max: 100,
 							step: 5,
+						},
+					},
+					{
+						name: 'Card append destination',
+						desc: 'Choose whether appending a card adds it to today\'s daily note or a specific custom note.',
+						control: {
+							type: 'dropdown',
+							key: 'cardAppendTarget',
+							defaultValue: DEFAULT_SETTINGS.cardAppendTarget,
+							options: {
+								daily: 'Today\'s daily note',
+								custom: 'Custom note',
+							},
+						},
+					},
+					{
+						name: 'Custom note path for appending',
+						desc: 'Relative path in your vault where cards will be appended when target is set to custom (default: Anki Notes.md).',
+						control: {
+							type: 'text',
+							key: 'cardAppendCustomPath',
+							placeholder: 'Anki Notes.md',
+						},
+					},
+					{
+						name: 'Heading for appended cards',
+						desc: 'Heading in the target note under which cards will be appended (leave blank to append at the end).',
+						control: {
+							type: 'text',
+							key: 'cardAppendHeading',
+							placeholder: '## Anki Reviews',
 						},
 					},
 					{
