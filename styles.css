@@ -107,6 +107,19 @@
 	hyphens: auto;
 }
 
+.anki-embed-card.anki-embed-card-custom {
+	padding: 0;
+	background-color: transparent;
+	overflow-x: auto;
+	overflow-y: auto;
+	display: block;
+}
+
+.anki-embed-container.is-full-view .anki-embed-card.anki-embed-card-custom {
+	padding: 0;
+	display: block;
+}
+
 .anki-embed-card img {
 	max-width: 100%;
 	height: auto;

@@ -6,6 +6,7 @@ export interface AnkiEmbedSettings {
 	randomizeCards: boolean;
 	minCardHeight: string;
 	useCustomAnkiConnect: boolean;
+	useCardStyles: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -16,6 +17,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	randomizeCards: true,
 	minCardHeight: '280px',
 	useCustomAnkiConnect: false,
+	useCardStyles: true,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -27,6 +29,7 @@ export interface DeckEmbedConfig {
 	filter?: 'all' | 'due' | 'new';
 	randomize?: boolean;
 	select?: boolean;
+	styles?: boolean;
 	[key: string]: unknown;
 }
 
@@ -42,6 +45,8 @@ export interface AnkiCardInfo {
 	answer: string;
 	deckName: string;
 	modelName: string;
+	css?: string;
+	ord?: number;
 	due?: number;
 	interval?: number;
 	lapses?: number;

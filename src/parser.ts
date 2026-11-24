@@ -40,6 +40,14 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 			} else if (key === 'select' || key === 'interactive') {
 				config.select = val.toLowerCase() === 'true' || val === '1' || val.toLowerCase() === 'yes';
 				hasKeyValue = true;
+			} else if (key === 'styles' || key === 'style') {
+				const valLower = val.toLowerCase();
+				if (['true', '1', 'yes', 'anki', 'original'].includes(valLower)) {
+					config.styles = true;
+				} else if (['false', '0', 'no', 'obsidian', 'native'].includes(valLower)) {
+					config.styles = false;
+				}
+				hasKeyValue = true;
 			}
 		}
 	}

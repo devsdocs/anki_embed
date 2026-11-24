@@ -15,3 +15,9 @@ export function extractAnswerHtml(answerHtml: string): string {
 
 	return answerHtml.slice(marker.index + marker[0].length);
 }
+
+export function normalizeAnkiCss(css: string): string {
+	if (!css) return '';
+	return css.replace(/\b(?:html|body)\b/g, '.card');
+}
+

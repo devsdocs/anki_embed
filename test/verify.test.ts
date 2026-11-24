@@ -1,8 +1,8 @@
 import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
-import { extractAnswerHtml, formatCardHtml } from '../src/card-html';
-import { VIEW_TYPE_ANKI_EMBED } from '../src/types';
+import { extractAnswerHtml, formatCardHtml, normalizeAnkiCss } from '../src/card-html';
+import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 
 console.log('Running Anki Embed verification tests...');
 
@@ -43,6 +43,19 @@ const configSelectQuestion = parseDeckConfig('deck: ?');
 assert.strictEqual(configSelectQuestion.select, true);
 assert.strictEqual(configSelectQuestion.deck, undefined);
 
+// 3c. Test parseDeckConfig - styles format
+const configStylesAnki = parseDeckConfig('styles: anki');
+assert.strictEqual(configStylesAnki.styles, true);
+
+const configStylesTrue = parseDeckConfig('styles: true');
+assert.strictEqual(configStylesTrue.styles, true);
+
+const configStylesObsidian = parseDeckConfig('styles: obsidian');
+assert.strictEqual(configStylesObsidian.styles, false);
+
+const configStylesFalse = parseDeckConfig('styles: false');
+assert.strictEqual(configStylesFalse.styles, false);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
@@ -63,6 +76,17 @@ assert.strictEqual(
 );
 assert.strictEqual(formatCardHtml('{{FrontSide}}', '$$B_S$$'), '$$B_S$$');
 assert.strictEqual(extractAnswerHtml('Back side without a front-side marker'), 'Back side without a front-side marker');
+
+// 5b. Test normalizeAnkiCss
+assert.strictEqual(
+	normalizeAnkiCss('.card { font-family: arial; }'),
+	'.card { font-family: arial; }'
+);
+assert.strictEqual(
+	normalizeAnkiCss('body { font-size: 20px; } html { margin: 0; } body.nightMode { background: black; }'),
+	'.card { font-size: 20px; } .card { margin: 0; } .card.nightMode { background: black; }'
+);
+assert.strictEqual(normalizeAnkiCss(''), '');
 
 // 6. Test AnkiClient payload construction & endpoint coverage
 const client = new AnkiClient('http://127.0.0.1:8765', 'test-api-key');
@@ -89,6 +113,9 @@ const resetConfig = { ...config1, select: true, deck: undefined, query: undefine
 assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
+
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true
+assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 
 console.log('✅ All verification tests passed successfully!');
 

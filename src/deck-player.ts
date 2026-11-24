@@ -1,6 +1,6 @@
 import { sanitizeHTMLToDom, Notice } from 'obsidian';
 import { AnkiClient } from './anki-client';
-import { extractAnswerHtml, formatCardHtml } from './card-html';
+import { extractAnswerHtml, formatCardHtml, normalizeAnkiCss } from './card-html';
 import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
 
 export class DeckPlayer {
@@ -15,6 +15,7 @@ export class DeckPlayer {
 	private isLoading: boolean = false;
 	private hasStarted: boolean = false;
 	private mediaCache = new Map<string, string | null>();
+	private modelStyleCache = new Map<string, string>();
 	private loadRequestId = 0;
 	private cardStartTime: number = 0;
 
@@ -547,6 +548,44 @@ export class DeckPlayer {
 		return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
 	}
 
+	private async getCardCss(card: AnkiCardInfo): Promise<string> {
+		if (card.css && card.css.trim().length > 0) {
+			return card.css;
+		}
+		if (!card.modelName) {
+			return '';
+		}
+		if (this.modelStyleCache.has(card.modelName)) {
+			return this.modelStyleCache.get(card.modelName) ?? '';
+		}
+		try {
+			const styling = await this.client.getModelStyling(card.modelName);
+			const css = styling?.css ?? '';
+			this.modelStyleCache.set(card.modelName, css);
+			return css;
+		} catch {
+			this.modelStyleCache.set(card.modelName, '');
+			return '';
+		}
+	}
+
+	private async renderCardInLightDom(cardEl: HTMLElement, card: AnkiCardInfo): Promise<void> {
+		cardEl.addClass('card');
+		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
+		qDiv.empty();
+		const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
+		qDiv.appendChild(qFragment);
+
+		if (this.showingAnswer) {
+			cardEl.createDiv({ cls: 'anki-embed-separator' });
+			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
+			aDiv.empty();
+			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
+			const aFragment = await this.getResolvedMediaFragment(answerHtml);
+			aDiv.appendChild(aFragment);
+		}
+	}
+
 	private async renderCurrentCard() {
 		this.container.empty();
 
@@ -564,20 +603,121 @@ export class DeckPlayer {
 
 		this.renderHeader(card.deckName || this.config.deck, true);
 
-		const cardEl = this.container.createDiv({ cls: 'anki-embed-card card' });
+		const cardEl = this.container.createDiv({ cls: 'anki-embed-card' });
+		if (this.settings.minCardHeight) {
+			cardEl.style.minHeight = this.settings.minCardHeight;
+		}
 
-		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
-		qDiv.empty();
-		const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
-		qDiv.appendChild(qFragment);
+		const shouldUseCardStyles = this.config.styles ?? this.settings.useCardStyles;
 
-		if (this.showingAnswer) {
-			cardEl.createDiv({ cls: 'anki-embed-separator' });
-			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
-			aDiv.empty();
-			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
-			const aFragment = await this.getResolvedMediaFragment(answerHtml);
-			aDiv.appendChild(aFragment);
+		if (shouldUseCardStyles && typeof cardEl.attachShadow === 'function') {
+			try {
+				cardEl.addClass('anki-embed-card-custom');
+				const shadow = cardEl.attachShadow({ mode: 'open' });
+
+				const rawCss = await this.getCardCss(card);
+				const normalizedCss = normalizeAnkiCss(rawCss);
+
+				const baseCardCss = `
+:host {
+	display: block;
+	width: 100%;
+	min-height: 100%;
+	box-sizing: border-box;
+}
+.card {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	font-family: var(--font-text);
+	font-size: 1.05em;
+	line-height: 1.6;
+	text-align: left;
+	word-wrap: break-word;
+	hyphens: auto;
+	padding: 20px;
+	min-height: 100%;
+	height: auto;
+	box-sizing: border-box;
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+}
+.card.nightMode,
+.card.night_mode {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+}
+.anki-embed-question,
+.anki-embed-answer {
+	width: 100%;
+}
+.anki-embed-answer {
+	margin-top: 12px;
+	animation: anki-fade-in 0.25s ease-in-out;
+}
+.anki-embed-separator {
+	width: 80%;
+	border: 0;
+	height: 1px;
+	background: var(--background-modifier-border);
+	margin: 14px auto;
+}
+.cloze {
+	color: var(--interactive-accent);
+	font-weight: bold;
+}
+img {
+	max-width: 100%;
+	height: auto;
+	border-radius: 4px;
+	margin: 8px 0;
+}
+@keyframes anki-fade-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+${normalizedCss}
+
+.card {
+	min-height: 100% !important;
+	height: auto !important;
+	box-sizing: border-box !important;
+}
+`;
+				if ('adoptedStyleSheets' in shadow && typeof CSSStyleSheet !== 'undefined') {
+					const sheet = new CSSStyleSheet();
+					sheet.replaceSync(baseCardCss);
+					shadow.adoptedStyleSheets = [sheet];
+				}
+
+				const isNightMode = typeof document !== 'undefined' && document.body.classList.contains('theme-dark');
+				const ordClass = typeof card.ord === 'number' ? `card${card.ord + 1}` : '';
+				const cardContainer = (shadow as Node).createDiv({
+					cls: `card ${ordClass} ${isNightMode ? 'nightMode night_mode' : ''}`.trim(),
+				});
+
+				const qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
+				const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
+				qDiv.appendChild(qFragment);
+
+				if (this.showingAnswer) {
+					cardContainer.createEl('hr', { cls: 'anki-embed-separator' });
+					const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer' });
+					const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
+					const aFragment = await this.getResolvedMediaFragment(answerHtml);
+					aDiv.appendChild(aFragment);
+				}
+			} catch {
+				await this.renderCardInLightDom(cardEl, card);
+			}
+		} else {
+			await this.renderCardInLightDom(cardEl, card);
 		}
 
 		const footer = this.container.createDiv({ cls: 'anki-embed-footer' });

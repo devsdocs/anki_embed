@@ -227,6 +227,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.useCustomAnkiConnect = DEFAULT_SETTINGS.useCustomAnkiConnect;
 			repaired = true;
 		}
+		if (typeof this.settings.useCardStyles !== 'boolean') {
+			this.settings.useCardStyles = DEFAULT_SETTINGS.useCardStyles;
+			repaired = true;
+		}
 
 		if (repaired) {
 			await this.saveData(this.settings);
@@ -310,6 +314,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'randomizeCards',
 							defaultValue: DEFAULT_SETTINGS.randomizeCards,
+						},
+					},
+					{
+						name: 'Use original Anki card styles',
+						desc: 'Display cards using the original CSS styling from your Anki note types.',
+						control: {
+							type: 'toggle',
+							key: 'useCardStyles',
+							defaultValue: DEFAULT_SETTINGS.useCardStyles,
 						},
 					},
 					{
