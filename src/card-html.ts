@@ -272,4 +272,66 @@ export function extractAnkiTagsFromText(content: string): string[] {
 	return Array.from(tags).filter((t) => t.length > 0);
 }
 
+export function renderClozeDeletion(text: string, targetOrd: number, placeholder: string = '**[...]**'): string {
+	const targetIndex = targetOrd + 1;
+	const clozeRegex = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+
+	return text.replace(clozeRegex, (_match: string, numStr: string, answerText: string): string => {
+		const num = Number.parseInt(numStr, 10);
+		if (num === targetIndex) {
+			return placeholder;
+		} else {
+			return (answerText ?? '').trim();
+		}
+	});
+}
+
+export function formatClozeTitle(
+	questionOrText: string,
+	options?: {
+		card?: { fields?: Record<string, { value: string }>; ord?: number; question?: string };
+		placeholder?: string;
+	}
+): string {
+	const placeholder = options?.placeholder ?? '**[...]**';
+	const card = options?.card;
+
+	let text = '';
+	if (card?.fields?.Text?.value) {
+		const ord = card.ord ?? 0;
+		text = renderClozeDeletion(card.fields.Text.value, ord, placeholder);
+	} else if (card?.question) {
+		text = card.question.replace(/<(?:span|div)\b[^>]*\bclass\s*=\s*["']?cloze["'][^>]*>[\s\S]*?<\/(?:span|div)>/gi, placeholder);
+	} else {
+		text = questionOrText;
+	}
+
+	// Remove basic HTML tags
+	text = text.replace(/<[^>]+>/g, '');
+
+	// Decode common HTML entities
+	text = text
+		.replace(/&nbsp;/gi, ' ')
+		.replace(/&amp;/gi, '&')
+		.replace(/&lt;/gi, '<')
+		.replace(/&gt;/gi, '>')
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;/gi, "'");
+
+	// Standardize cloze placeholders: ensure hint or unbolded [...] becomes the placeholder
+	text = text.replace(/(?:\*\*)?\[[\s\S]*?\](?:\*\*)?/g, (match) => {
+		if (match.includes('...') || match.includes('[...]')) {
+			return placeholder;
+		}
+		return match;
+	});
+
+	// Normalize spaces and newlines
+	let clean = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+	// Remove leading markdown header marks (#)
+	clean = clean.replace(/^#+\s*/, '').trim();
+
+	return clean;
+}
+
 

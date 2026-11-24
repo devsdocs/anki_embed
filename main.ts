@@ -428,6 +428,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.autoLinkExportedCard = DEFAULT_SETTINGS.autoLinkExportedCard;
 			repaired = true;
 		}
+		if (typeof this.settings.cardExportFolder !== 'string') {
+			this.settings.cardExportFolder = DEFAULT_SETTINGS.cardExportFolder;
+			repaired = true;
+		}
 		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
 			this.settings.gamepadMapping = Object.assign({}, DEFAULT_GAMEPAD_MAPPING);
 			repaired = true;
@@ -649,6 +653,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'text',
 							key: 'cardAppendHeading',
 							placeholder: '## Anki Reviews',
+						},
+					},
+					{
+						name: 'Card export folder',
+						desc: 'Folder where newly created notes from Anki cards will be saved (leave blank to save in vault root).',
+						control: {
+							type: 'text',
+							key: 'cardExportFolder',
+							placeholder: 'e.g. Cards or Anki/Exported',
 						},
 					},
 					{

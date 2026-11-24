@@ -6,11 +6,13 @@ import {
 	extractAnkiTagsFromText,
 	extractAnswerHtml,
 	formatCardHtml,
+	formatClozeTitle,
 	isClozeCard,
 	isTagMatch,
 	normalizeAnkiCss,
 	normalizeAnkiTag,
 	parseTagItem,
+	renderClozeDeletion,
 } from '../src/card-html';
 import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 
@@ -275,6 +277,7 @@ assert.strictEqual(DEFAULT_SETTINGS.enableCardLinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableBacklinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableTagLinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.autoLinkExportedCard, true);
+assert.strictEqual(DEFAULT_SETTINGS.cardExportFolder, '');
 assert.strictEqual(DEFAULT_SETTINGS.enableGamepad, true);
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[0], 'flip_or_good');
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[4], 'undo');
@@ -364,6 +367,41 @@ assert.notStrictEqual(tagItem1.parentPath, tagItem2.parentPath);
 const tagItemSingle = parseTagItem('Cardio');
 assert.strictEqual(tagItemSingle.leafTag, 'Cardio');
 assert.strictEqual(tagItemSingle.parentPath, '');
+
+// 9g. formatClozeTitle tests
+const clozeTitle1 = formatClozeTitle('', {
+	card: {
+		fields: { Text: { value: 'What G protein is the {{c1::H2 histamine receptor}} coupled to?' } },
+		ord: 0,
+	},
+});
+assert.strictEqual(clozeTitle1, 'What G protein is the **[...]** coupled to?');
+
+// Hint in cloze should still format as **[...]** in exported title
+const clozeTitleWithHint = formatClozeTitle('', {
+	card: {
+		fields: { Text: { value: 'The {{c1::axillary::nerve}} innervates the deltoid.' } },
+		ord: 0,
+	},
+});
+assert.strictEqual(clozeTitleWithHint, 'The **[...]** innervates the deltoid.');
+
+// Multiple clozes on one card
+const clozeTitleMulti = formatClozeTitle('', {
+	card: {
+		fields: { Text: { value: '{{c1::Sympathetic}} and {{c2::parasympathetic}} nervous systems.' } },
+		ord: 1,
+	},
+});
+assert.strictEqual(clozeTitleMulti, 'Sympathetic and **[...]** nervous systems.');
+
+// Cloze from HTML question fallback
+const clozeTitleHtml = formatClozeTitle('What G protein is the <span class="cloze">[...]</span> coupled to?');
+assert.strictEqual(clozeTitleHtml, 'What G protein is the **[...]** coupled to?');
+
+// Cloze question with [...] already
+const clozeTitlePlain = formatClozeTitle('What G protein is the H2 histamine receptor coupled to? [...]');
+assert.strictEqual(clozeTitlePlain, 'What G protein is the H2 histamine receptor coupled to? **[...]**');
 
 console.log('✅ All verification tests passed successfully!');
 

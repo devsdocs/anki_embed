@@ -6,6 +6,7 @@ import {
 	extractAnkiTagsFromText,
 	extractAnswerHtml,
 	formatCardHtml,
+	formatClozeTitle,
 	isClozeCard,
 	isTagMatch,
 	normalizeAnkiCss,
@@ -2986,6 +2987,22 @@ ${normalizedCss}
 		return clean;
 	}
 
+	private generateCleanFileTitle(titleText: string, cardId: number, maxLen: number = 200): string {
+		let clean = titleText
+			.replace(/\*\*\[\.\.\.\]\*\*/g, '[...]')
+			.replace(/[*\\/:?"<>|#^]/g, '')
+			.replace(/\s+/g, ' ')
+			.trim();
+
+		if (!clean) return `Anki Card ${cardId}`;
+		if (maxLen > 0 && clean.length > maxLen) {
+			const slice = clean.slice(0, maxLen);
+			const lastSpace = slice.lastIndexOf(' ');
+			return lastSpace > maxLen / 2 ? slice.slice(0, lastSpace).trim() : slice.trim();
+		}
+		return clean;
+	}
+
 	private showCardContextMenu(evt: MouseEvent, card: AnkiCardInfo) {
 		evt.preventDefault();
 		evt.stopPropagation();
@@ -3171,13 +3188,30 @@ ${normalizedCss}
 
 		try {
 			const content = this.extractCardContent(card);
-			const title = this.generateCleanTitle(content.question, card.cardId);
-			const fileTitle = this.generateCleanTitle(content.question, card.cardId, 200);
+			const isCloze = isClozeCard(card);
+			const title = isCloze
+				? formatClozeTitle(content.question, { card, placeholder: '**[...]**' })
+				: this.generateCleanTitle(content.question, card.cardId);
+			const fileTitle = this.generateCleanFileTitle(title, card.cardId, 200);
 
-			let filename = `${fileTitle}.md`;
+			const folderSetting = (this.settings.cardExportFolder || '').trim().replace(/^\/+|\/+$/g, '');
+			let folderPrefix = '';
+			if (folderSetting) {
+				folderPrefix = `${folderSetting}/`;
+				const parts = folderSetting.split('/');
+				let currentPath = '';
+				for (const part of parts) {
+					currentPath = currentPath ? `${currentPath}/${part}` : part;
+					if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+						await this.app.vault.createFolder(currentPath);
+					}
+				}
+			}
+
+			let filename = `${folderPrefix}${fileTitle}.md`;
 			let counter = 1;
 			while (this.app.vault.getAbstractFileByPath(filename)) {
-				filename = `${fileTitle} (${counter}).md`;
+				filename = `${folderPrefix}${fileTitle} (${counter}).md`;
 				counter++;
 			}
 
