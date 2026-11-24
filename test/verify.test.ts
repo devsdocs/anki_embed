@@ -1,7 +1,7 @@
 import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
-import { extractAnswerHtml, formatCardHtml, normalizeAnkiCss } from '../src/card-html';
+import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from '../src/card-html';
 import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 
 console.log('Running Anki Embed verification tests...');
@@ -97,6 +97,25 @@ assert.strictEqual(
 	'.card { font-size: 20px; } .card { margin: 0; } .card.nightMode { background: black; }'
 );
 assert.strictEqual(normalizeAnkiCss(''), '');
+
+// 5c. Test isClozeCard
+assert.strictEqual(
+	isClozeCard({ modelName: 'AnKingOverhaul', question: 'The <span class="cloze">[...]</span> nerve', answer: 'The <span class="cloze">axillary</span> nerve' }),
+	true
+);
+assert.strictEqual(
+	isClozeCard({ modelName: 'Cloze', question: 'Capital of [...] is Paris', answer: 'Capital of France is Paris' }),
+	true
+);
+assert.strictEqual(
+	isClozeCard({ modelName: 'Basic', question: 'What is the capital?', answer: 'What is the capital?<hr id=answer>Paris' }),
+	false
+);
+assert.strictEqual(
+	isClozeCard({ modelName: 'Custom', question: '2 + 2', answer: '4' }),
+	false
+);
+assert.strictEqual(isClozeCard(undefined), false);
 
 // 6. Test AnkiClient payload construction & endpoint coverage
 const client = new AnkiClient('http://127.0.0.1:8765', 'test-api-key');

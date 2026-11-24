@@ -21,3 +21,18 @@ export function normalizeAnkiCss(css: string): string {
 	return css.replace(/\b(?:html|body)\b/g, '.card');
 }
 
+export function isClozeCard(card?: { modelName?: string; question?: string; answer?: string }): boolean {
+	if (!card) return false;
+	if (card.modelName && card.modelName.toLowerCase().includes('cloze')) {
+		return true;
+	}
+	if (card.question && (card.question.includes('[...]') || /<(?:span|div)\b[^>]*\bclass\s*=\s*["']?cloze/i.test(card.question))) {
+		return true;
+	}
+	if (card.answer && /<(?:span|div)\b[^>]*\bclass\s*=\s*["']?cloze/i.test(card.answer)) {
+		return true;
+	}
+	return false;
+}
+
+

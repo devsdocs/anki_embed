@@ -1,6 +1,6 @@
 import { sanitizeHTMLToDom, Notice } from 'obsidian';
 import { AnkiClient } from './anki-client';
-import { extractAnswerHtml, formatCardHtml, normalizeAnkiCss } from './card-html';
+import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from './card-html';
 import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
 
 export class DeckPlayer {
@@ -799,15 +799,25 @@ export class DeckPlayer {
 
 	private async renderCardInLightDom(cardEl: HTMLElement, card: AnkiCardInfo): Promise<void> {
 		cardEl.addClass('card');
-		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
-		qDiv.empty();
-		const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
-		qDiv.appendChild(qFragment);
+		const isCloze = isClozeCard(card);
 
-		if (this.showingAnswer) {
+		if (!this.showingAnswer) {
+			const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
+			qDiv.empty();
+			const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
+			qDiv.appendChild(qFragment);
+		} else if (isCloze) {
+			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer anki-embed-cloze-answer' });
+			const answerHtml = formatCardHtml(card.answer, card.question);
+			const aFragment = await this.getResolvedMediaFragment(answerHtml);
+			aDiv.appendChild(aFragment);
+		} else {
+			const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
+			const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
+			qDiv.appendChild(qFragment);
+
 			cardEl.createDiv({ cls: 'anki-embed-separator' });
 			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
-			aDiv.empty();
 			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
 			const aFragment = await this.getResolvedMediaFragment(answerHtml);
 			aDiv.appendChild(aFragment);
@@ -930,11 +940,22 @@ ${normalizedCss}
 					cls: `card ${ordClass} ${isNightMode ? 'nightMode night_mode' : ''}`.trim(),
 				});
 
-				const qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
-				const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
-				qDiv.appendChild(qFragment);
+				const isCloze = isClozeCard(card);
 
-				if (this.showingAnswer) {
+				if (!this.showingAnswer) {
+					const qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
+					const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
+					qDiv.appendChild(qFragment);
+				} else if (isCloze) {
+					const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer anki-embed-cloze-answer' });
+					const answerHtml = formatCardHtml(card.answer, card.question);
+					const aFragment = await this.getResolvedMediaFragment(answerHtml);
+					aDiv.appendChild(aFragment);
+				} else {
+					const qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
+					const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
+					qDiv.appendChild(qFragment);
+
 					cardContainer.createEl('hr', { cls: 'anki-embed-separator' });
 					const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer' });
 					const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
