@@ -243,6 +243,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.cardOrder = DEFAULT_SETTINGS.cardOrder;
 			repaired = true;
 		}
+		if (typeof this.settings.showCardCounts !== 'boolean') {
+			this.settings.showCardCounts = DEFAULT_SETTINGS.showCardCounts;
+			repaired = true;
+		}
 
 		if (repaired) {
 			await this.saveData(this.settings);
@@ -341,6 +345,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'excludeSuspended',
 							defaultValue: DEFAULT_SETTINGS.excludeSuspended,
+						},
+					},
+					{
+						name: 'Show card counts (New, Learn, Review)',
+						desc: 'Display the remaining new, learning, and review card counts at the bottom of the card like in Anki desktop.',
+						control: {
+							type: 'toggle',
+							key: 'showCardCounts',
+							defaultValue: DEFAULT_SETTINGS.showCardCounts,
 						},
 					},
 					{

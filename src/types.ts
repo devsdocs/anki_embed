@@ -13,6 +13,7 @@ export interface AnkiEmbedSettings {
 	liveSync: boolean;
 	excludeSuspended: boolean;
 	cardOrder: AnkiCardOrder;
+	showCardCounts: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	liveSync: false,
 	excludeSuspended: true,
 	cardOrder: 'reviews-first',
+	showCardCounts: true,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -42,6 +44,7 @@ export interface DeckEmbedConfig {
 	live?: boolean;
 	excludeSuspended?: boolean;
 	order?: AnkiCardOrder;
+	counts?: boolean;
 	[key: string]: unknown;
 }
 

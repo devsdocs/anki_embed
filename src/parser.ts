@@ -76,6 +76,10 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 					config.order = 'default';
 				}
 				hasKeyValue = true;
+			} else if (key === 'counts' || key === 'showcounts' || key === 'show_counts' || key === 'stats') {
+				const valLower = val.toLowerCase();
+				config.counts = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
 			}
 		}
 	}

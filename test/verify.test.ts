@@ -87,6 +87,16 @@ assert.strictEqual(configReviewsFirst.order, 'reviews-first');
 const configOrderRandom = parseDeckConfig('order: random');
 assert.strictEqual(configOrderRandom.order, 'random');
 
+// 3h. Test parseDeckConfig - counts format
+const configCountsTrue = parseDeckConfig('counts: true');
+assert.strictEqual(configCountsTrue.counts, true);
+
+const configCountsFalse = parseDeckConfig('counts: false');
+assert.strictEqual(configCountsFalse.counts, false);
+
+const configStatsTrue = parseDeckConfig('stats: yes');
+assert.strictEqual(configStatsTrue.counts, true);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
@@ -168,11 +178,12 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first'
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
 assert.strictEqual(DEFAULT_SETTINGS.cardOrder, 'reviews-first');
+assert.strictEqual(DEFAULT_SETTINGS.showCardCounts, true);
 
 console.log('✅ All verification tests passed successfully!');
 

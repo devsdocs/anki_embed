@@ -20,6 +20,7 @@ export class DeckPlayer {
 	private cardStartTime: number = 0;
 	private liveSyncTimer: number | null = null;
 	private onWindowFocusHandler: (() => void) | null = null;
+	private currentCounts: { new: number; learn: number; review: number } | null = null;
 
 	private get isLiveSync(): boolean {
 		return this.config.live ?? this.settings.liveSync;
@@ -130,6 +131,51 @@ export class DeckPlayer {
 
 		const parts = [deckName, filterClause, suspendedClause].filter(Boolean);
 		return parts.length > 0 ? parts.join(' ') : (shouldExcludeSuspended ? '-is:suspended' : 'is:due');
+	}
+
+	private calculateSessionCounts(): { new: number; learn: number; review: number } {
+		let newCount = 0;
+		let learnCount = 0;
+		let reviewCount = 0;
+
+		for (let i = this.currentIndex; i < this.cards.length; i++) {
+			const c = this.cards[i];
+			if (!c) continue;
+			const isLearn = c.queue === 1 || c.queue === 3 || c.type === 1 || c.type === 3;
+			const isReview = c.queue === 2 || c.type === 2 || (c.reviews ?? c.reps ?? 0) > 0;
+			if (isLearn) {
+				learnCount++;
+			} else if (isReview) {
+				reviewCount++;
+			} else {
+				newCount++;
+			}
+		}
+
+		return { new: newCount, learn: learnCount, review: reviewCount };
+	}
+
+	private async updateCounts(deckName?: string): Promise<void> {
+		if (deckName) {
+			try {
+				const statsRecord = await this.client.getDeckStats([deckName]);
+				if (statsRecord && typeof statsRecord === 'object') {
+					const statList = Object.values(statsRecord);
+					const deckStat = statList.find(s => s.name === deckName) || statList[0];
+					if (deckStat) {
+						this.currentCounts = {
+							new: deckStat.new_count ?? 0,
+							learn: deckStat.learn_count ?? 0,
+							review: deckStat.review_count ?? 0,
+						};
+						return;
+					}
+				}
+			} catch {
+				// Fallback to session counts on failure
+			}
+		}
+		this.currentCounts = this.calculateSessionCounts();
 	}
 
 	private sortReviewsFirst(cards: AnkiCardInfo[], randomize: boolean = false): AnkiCardInfo[] {
@@ -263,6 +309,9 @@ export class DeckPlayer {
 			this.cards = finalCards;
 			this.isLoading = false;
 
+			const activeDeck = this.config.deck || this.cards[0]?.deckName;
+			await this.updateCounts(activeDeck);
+
 			if (this.cards.length === 0) {
 				this.renderEmpty();
 			} else if (!this.hasStarted) {
@@ -305,6 +354,8 @@ export class DeckPlayer {
 
 			this.cards = [currentCard];
 			this.currentIndex = 0;
+
+			await this.updateCounts(currentCard.deckName || this.config.deck);
 
 			if (!this.hasStarted) {
 				this.renderStartScreenLive(currentCard);
@@ -428,6 +479,7 @@ export class DeckPlayer {
 						this.cards = [currentCard];
 						this.currentIndex = 0;
 						this.showingAnswer = false;
+						await this.updateCounts(currentCard.deckName || this.config.deck);
 						await this.renderCurrentCard();
 					}
 				} catch {
@@ -445,6 +497,7 @@ export class DeckPlayer {
 						this.cards = [currentCard];
 						this.currentIndex = 0;
 						this.showingAnswer = false;
+						await this.updateCounts(currentCard.deckName || this.config.deck);
 						await this.renderCurrentCard();
 					}
 				} catch {
@@ -1060,6 +1113,25 @@ ${normalizedCss}
 
 		const footer = this.container.createDiv({ cls: 'anki-embed-footer' });
 
+		const shouldShowCounts = this.config.counts ?? this.settings.showCardCounts;
+		if (shouldShowCounts) {
+			const counts = this.currentCounts ?? this.calculateSessionCounts();
+			const countsContainer = footer.createDiv({ cls: 'anki-embed-counts' });
+
+			const newEl = countsContainer.createSpan({ cls: 'anki-count-new', text: String(counts.new) });
+			newEl.setAttribute('title', `${counts.new} new cards`);
+
+			countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+
+			const learnEl = countsContainer.createSpan({ cls: 'anki-count-learn', text: String(counts.learn) });
+			learnEl.setAttribute('title', `${counts.learn} learning/relearning cards`);
+
+			countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+
+			const reviewEl = countsContainer.createSpan({ cls: 'anki-count-review', text: String(counts.review) });
+			reviewEl.setAttribute('title', `${counts.review} review cards`);
+		}
+
 		if (!this.showingAnswer) {
 			const flipBtn = footer.createEl('button', {
 				cls: 'anki-embed-flip-btn',
@@ -1150,6 +1222,7 @@ ${normalizedCss}
 				if (nextCard) {
 					this.cards = [nextCard];
 					this.currentIndex = 0;
+					await this.updateCounts(nextCard.deckName || this.config.deck);
 					await this.renderCurrentCard();
 				} else {
 					this.cards = [];
@@ -1173,6 +1246,8 @@ ${normalizedCss}
 
 		this.currentIndex++;
 		this.showingAnswer = false;
+		const activeDeck = card?.deckName || this.config.deck;
+		await this.updateCounts(activeDeck);
 		await this.renderCurrentCard();
 	}
 
