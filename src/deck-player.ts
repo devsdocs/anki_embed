@@ -2023,6 +2023,15 @@ export class DeckPlayer {
 			}
 		}
 
+		const decksBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-icon anki-embed-btn-decks',
+			text: '📚',
+			attr: { title: 'Back to deck selection' },
+		});
+		decksBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
+
 		if (this.onOpenFullView && !this.isFullView) {
 			const fullViewBtn = actions.createEl('button', {
 				cls: 'anki-embed-btn-icon',
@@ -2500,7 +2509,12 @@ export class DeckPlayer {
 :host {
 	display: block;
 	width: 100%;
+	height: 100%;
 	min-height: 100%;
+	margin: 0 !important;
+	padding: 0 !important;
+	border-radius: var(--radius-s, 6px);
+	overflow: hidden;
 	box-sizing: border-box;
 	--anki-card-zoom: ${fontScale};
 }
@@ -2514,7 +2528,7 @@ export class DeckPlayer {
 	text-align: left;
 	word-wrap: break-word;
 	hyphens: auto;
-	padding: 20px;
+	padding: ${this.isFullView ? '8px 16px' : '20px'};
 	min-height: 100%;
 	height: auto;
 	box-sizing: border-box;
@@ -2555,8 +2569,16 @@ ${normalizedCss}
 
 .card {
 	min-height: 100% !important;
-	height: auto !important;
+	height: 100% !important;
 	box-sizing: border-box !important;
+	margin: 0 !important;
+	margin-top: 0 !important;
+	margin-bottom: 0 !important;
+	margin-left: 0 !important;
+	margin-right: 0 !important;
+	width: 100% !important;
+	max-width: 100% !important;
+	border-radius: var(--radius-s, 6px) !important;
 }
 `;
 				if ('adoptedStyleSheets' in shadow && typeof CSSStyleSheet !== 'undefined') {
@@ -2616,15 +2638,17 @@ ${normalizedCss}
 		const controlsContainer = footer.createDiv({ cls: 'anki-embed-footer-controls' });
 		this.renderFooterControls(controlsContainer, card);
 
-		const resetRow = footer.createDiv({ cls: 'anki-embed-reset-row' });
-		const resetBtn = resetRow.createEl('button', {
-			cls: 'anki-embed-btn-link',
-			text: '↩ Back to deck selection',
-			attr: { title: 'Reset view and back to deck selection' },
-		});
-		resetBtn.onclick = () => {
-			this.resetToDeckPicker();
-		};
+		if (!this.isFullView) {
+			const resetRow = footer.createDiv({ cls: 'anki-embed-reset-row' });
+			const resetBtn = resetRow.createEl('button', {
+				cls: 'anki-embed-btn-link',
+				text: '↩ Back to deck selection',
+				attr: { title: 'Reset view and back to deck selection' },
+			});
+			resetBtn.onclick = () => {
+				this.resetToDeckPicker();
+			};
+		}
 
 		this.preparseNextCard();
 	}
