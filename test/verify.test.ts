@@ -113,6 +113,12 @@ assert.strictEqual(configHeatmapTrue.heatmap, true);
 const configHeatmapFalse = parseDeckConfig('heatmap: false');
 assert.strictEqual(configHeatmapFalse.heatmap, false);
 
+// 3k. Test parseDeckConfig - timer format
+const configTimerTrue = parseDeckConfig('timer: true\ntimer_warning: 5\ntimer_limit: 10');
+assert.strictEqual(configTimerTrue.timer, true);
+assert.strictEqual(configTimerTrue.timerWarning, 5);
+assert.strictEqual(configTimerTrue.timerLimit, 10);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
@@ -194,13 +200,16 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
 assert.strictEqual(DEFAULT_SETTINGS.cardOrder, 'reviews-first');
 assert.strictEqual(DEFAULT_SETTINGS.showCardCounts, true);
 assert.strictEqual(DEFAULT_SETTINGS.showHeatmap, true);
+assert.strictEqual(DEFAULT_SETTINGS.enableCardTimer, false);
+assert.strictEqual(DEFAULT_SETTINGS.timerWarningSeconds, 5);
+assert.strictEqual(DEFAULT_SETTINGS.timerLimitSeconds, 10);
 
 console.log('✅ All verification tests passed successfully!');
 

@@ -23,6 +23,9 @@ export class DeckPlayer {
 	private liveSyncTimer: number | null = null;
 	private onWindowFocusHandler: (() => void) | null = null;
 	private currentCounts: { new: number; learn: number; review: number } | null = null;
+	private cardTimerInterval: number | null = null;
+	private timeStreak: number = 0;
+	private timerExceededForCurrentCard: boolean = false;
 
 	private get isLiveSync(): boolean {
 		return this.config.live ?? this.settings.liveSync;
@@ -531,12 +534,59 @@ export class DeckPlayer {
 		}
 	}
 
+	public stopCardTimer() {
+		if (this.cardTimerInterval !== null) {
+			window.clearInterval(this.cardTimerInterval);
+			this.cardTimerInterval = null;
+		}
+	}
+
+	private startCardTimer(timerPill: HTMLElement, timerTextEl: HTMLElement, streakEl: HTMLElement) {
+		this.stopCardTimer();
+		const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+
+		this.cardTimerInterval = window.setInterval(() => {
+			if (!this.container.isConnected) {
+				this.stopCardTimer();
+				return;
+			}
+
+			const elapsedSec = this.cardStartTime > 0 ? (Date.now() - this.cardStartTime) / 1000 : 0;
+			timerTextEl.setText(`${elapsedSec.toFixed(1)}s`);
+
+			if (elapsedSec >= limitSec) {
+				timerPill.removeClass('is-normal');
+				timerPill.removeClass('is-warning');
+				timerPill.addClass('is-overtime');
+
+				if (!this.timerExceededForCurrentCard) {
+					this.timerExceededForCurrentCard = true;
+					this.timeStreak = 0;
+					streakEl.setText('⚡ 0');
+				}
+			} else if (elapsedSec >= warningSec) {
+				timerPill.removeClass('is-normal');
+				timerPill.removeClass('is-overtime');
+				timerPill.addClass('is-warning');
+			} else {
+				timerPill.removeClass('is-warning');
+				timerPill.removeClass('is-overtime');
+				timerPill.addClass('is-normal');
+			}
+		}, 100);
+	}
+
 	public destroy(): void {
 		this.stopLiveSyncWatcher();
+		this.stopCardTimer();
 	}
 
 	public resetToDeckPicker(): void {
 		this.stopLiveSyncWatcher();
+		this.stopCardTimer();
+		this.timeStreak = 0;
+		this.timerExceededForCurrentCard = false;
 		this.hasStarted = false;
 		this.currentIndex = 0;
 		this.showingAnswer = false;
@@ -941,6 +991,31 @@ export class DeckPlayer {
 					text: `${this.currentIndex + 1} / ${this.cards.length}`,
 				});
 			}
+
+			const shouldShowTimer = this.config.timer ?? this.settings.enableCardTimer;
+			if (shouldShowTimer && !isPicker) {
+				const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+				const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+				const timerPill = titleContainer.createDiv({
+					cls: 'anki-embed-timer-pill is-normal',
+					attr: {
+						title: `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s`,
+					},
+				});
+				timerPill.createSpan({ cls: 'anki-timer-clock', text: '⏱️' });
+				const elapsedSoFar = this.cardStartTime > 0 ? (Date.now() - this.cardStartTime) / 1000 : 0;
+				const timerTextEl = timerPill.createSpan({
+					cls: 'anki-timer-seconds',
+					text: `${elapsedSoFar.toFixed(1)}s`,
+				});
+				const streakEl = timerPill.createSpan({
+					cls: 'anki-timer-streak',
+					text: `⚡ ${this.timeStreak}`,
+					attr: { title: `Time limit streak: ${this.timeStreak} cards in a row under limit` },
+				});
+
+				this.startCardTimer(timerPill, timerTextEl, streakEl);
+			}
 		}
 
 		const actions = header.createDiv({ cls: 'anki-embed-actions' });
@@ -1202,6 +1277,7 @@ export class DeckPlayer {
 
 		if (!this.showingAnswer) {
 			this.cardStartTime = Date.now();
+			this.timerExceededForCurrentCard = false;
 		}
 
 		if (this.currentIndex >= this.cards.length) {
@@ -1438,6 +1514,17 @@ ${normalizedCss}
 
 	private async rateCurrentCard(ease: 1 | 2 | 3 | 4): Promise<void> {
 		const timeTaken = this.cardStartTime > 0 ? Date.now() - this.cardStartTime : undefined;
+		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+
+		if (timeTaken !== undefined) {
+			const timeTakenSec = timeTaken / 1000;
+			if (!this.timerExceededForCurrentCard && timeTakenSec <= limitSec) {
+				this.timeStreak++;
+			} else {
+				this.timeStreak = 0;
+			}
+		}
+		this.stopCardTimer();
 		this.cardStartTime = 0;
 
 		if (ease === 1) this.sessionStats.again++;

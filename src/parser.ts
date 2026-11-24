@@ -84,6 +84,22 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 				const valLower = val.toLowerCase();
 				config.heatmap = valLower === 'true' || valLower === '1' || valLower === 'yes';
 				hasKeyValue = true;
+			} else if (key === 'timer' || key === 'showtimer' || key === 'show_timer') {
+				const valLower = val.toLowerCase();
+				config.timer = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
+			} else if (key === 'timer_warning' || key === 'warning' || key === 'timerwarning') {
+				const num = Number.parseFloat(val);
+				if (!Number.isNaN(num) && num > 0) {
+					config.timerWarning = num;
+				}
+				hasKeyValue = true;
+			} else if (key === 'timer_limit' || key === 'limit_seconds' || key === 'timerlimit' || key === 'timer_max') {
+				const num = Number.parseFloat(val);
+				if (!Number.isNaN(num) && num > 0) {
+					config.timerLimit = num;
+				}
+				hasKeyValue = true;
 			} else if (key === 'card' || key === 'cardid' || key === 'cid') {
 				const num = Number.parseInt(val, 10);
 				if (!Number.isNaN(num) && num > 0) {

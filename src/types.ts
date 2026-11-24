@@ -15,6 +15,9 @@ export interface AnkiEmbedSettings {
 	cardOrder: AnkiCardOrder;
 	showCardCounts: boolean;
 	showHeatmap: boolean;
+	enableCardTimer: boolean;
+	timerWarningSeconds: number;
+	timerLimitSeconds: number;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -31,6 +34,9 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	cardOrder: 'reviews-first',
 	showCardCounts: true,
 	showHeatmap: true,
+	enableCardTimer: false,
+	timerWarningSeconds: 5,
+	timerLimitSeconds: 10,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -50,6 +56,9 @@ export interface DeckEmbedConfig {
 	order?: AnkiCardOrder;
 	counts?: boolean;
 	heatmap?: boolean;
+	timer?: boolean;
+	timerWarning?: number;
+	timerLimit?: number;
 	[key: string]: unknown;
 }
 

@@ -276,6 +276,18 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.showHeatmap = DEFAULT_SETTINGS.showHeatmap;
 			repaired = true;
 		}
+		if (typeof this.settings.enableCardTimer !== 'boolean') {
+			this.settings.enableCardTimer = DEFAULT_SETTINGS.enableCardTimer;
+			repaired = true;
+		}
+		if (typeof this.settings.timerWarningSeconds !== 'number' || this.settings.timerWarningSeconds <= 0) {
+			this.settings.timerWarningSeconds = DEFAULT_SETTINGS.timerWarningSeconds;
+			repaired = true;
+		}
+		if (typeof this.settings.timerLimitSeconds !== 'number' || this.settings.timerLimitSeconds <= 0) {
+			this.settings.timerLimitSeconds = DEFAULT_SETTINGS.timerLimitSeconds;
+			repaired = true;
+		}
 
 		if (repaired) {
 			await this.saveData(this.settings);
@@ -392,6 +404,39 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'showHeatmap',
 							defaultValue: DEFAULT_SETTINGS.showHeatmap,
+						},
+					},
+					{
+						name: 'Enable card timer',
+						desc: 'Show a timer on the review card tracking time spent, with warning and overtime states.',
+						control: {
+							type: 'toggle',
+							key: 'enableCardTimer',
+							defaultValue: DEFAULT_SETTINGS.enableCardTimer,
+						},
+					},
+					{
+						name: 'Timer warning threshold (seconds)',
+						desc: 'Time at which the timer turns red as a warning (default: 5s).',
+						control: {
+							type: 'slider',
+							key: 'timerWarningSeconds',
+							defaultValue: DEFAULT_SETTINGS.timerWarningSeconds,
+							min: 1,
+							max: 60,
+							step: 1,
+						},
+					},
+					{
+						name: 'Timer limit threshold (seconds)',
+						desc: 'Time at which the timer turns grey and resets your streak (default: 10s).',
+						control: {
+							type: 'slider',
+							key: 'timerLimitSeconds',
+							defaultValue: DEFAULT_SETTINGS.timerLimitSeconds,
+							min: 2,
+							max: 120,
+							step: 1,
 						},
 					},
 					{
