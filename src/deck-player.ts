@@ -1,4 +1,5 @@
-import { sanitizeHTMLToDom, Notice } from 'obsidian';
+import { sanitizeHTMLToDom, Notice, Menu } from 'obsidian';
+import type { App } from 'obsidian';
 import { AnkiClient } from './anki-client';
 import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from './card-html';
 import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
@@ -8,6 +9,7 @@ export class DeckPlayer {
 	private config: DeckEmbedConfig;
 	private client: AnkiClient;
 	private settings: AnkiEmbedSettings;
+	private app?: App;
 
 	private cards: AnkiCardInfo[] = [];
 	private currentIndex: number = 0;
@@ -44,7 +46,8 @@ export class DeckPlayer {
 		settings: AnkiEmbedSettings,
 		onOpenFullView?: (config: DeckEmbedConfig) => void,
 		isFullView: boolean = false,
-		onDeckChange?: (deck: string) => void
+		onDeckChange?: (deck: string) => void,
+		app?: App
 	) {
 		this.container = container;
 		this.config = config;
@@ -53,6 +56,7 @@ export class DeckPlayer {
 		this.onOpenFullView = onOpenFullView;
 		this.isFullView = isFullView;
 		this.onDeckChange = onDeckChange;
+		this.app = app;
 	}
 
 	public async init(): Promise<void> {
@@ -106,6 +110,11 @@ export class DeckPlayer {
 	}
 
 	private buildQuery(): string {
+		const targetCardId = this.config.card ?? this.config.cardId;
+		if (targetCardId) {
+			return `cid:${targetCardId}`;
+		}
+
 		const shouldExcludeSuspended = this.config.excludeSuspended ?? this.settings.excludeSuspended;
 		const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
 
@@ -156,12 +165,13 @@ export class DeckPlayer {
 	}
 
 	private async updateCounts(deckName?: string): Promise<void> {
-		if (deckName) {
+		const targetDeck = this.config.deck || deckName;
+		if (targetDeck) {
 			try {
-				const statsRecord = await this.client.getDeckStats([deckName]);
+				const statsRecord = await this.client.getDeckStats([targetDeck]);
 				if (statsRecord && typeof statsRecord === 'object') {
 					const statList = Object.values(statsRecord);
-					const deckStat = statList.find(s => s.name === deckName) || statList[0];
+					const deckStat = statList.find(s => s.name?.toLowerCase() === targetDeck.toLowerCase()) || statList[0];
 					if (deckStat) {
 						this.currentCounts = {
 							new: deckStat.new_count ?? 0,
@@ -203,7 +213,8 @@ export class DeckPlayer {
 
 	public async loadCards(): Promise<void> {
 		const requestId = ++this.loadRequestId;
-		if (this.config.select || (!this.config.deck && !this.config.query && !this.isLiveSync)) {
+		const targetCardId = this.config.card ?? this.config.cardId;
+		if (this.config.select || (!this.config.deck && !this.config.query && !targetCardId && !this.isLiveSync)) {
 			this.stopLiveSyncWatcher();
 			await this.renderDeckPicker(requestId);
 			return;
@@ -234,8 +245,9 @@ export class DeckPlayer {
 
 			let selectedIds: number[] = [];
 
-			// If reviews-first and studying due+new or all without custom query: prioritize due IDs up to limit
-			if (orderMode === 'reviews-first' && !this.config.query && (filterMode === 'due+new' || filterMode === 'all')) {
+			if (targetCardId) {
+				selectedIds = [targetCardId];
+			} else if (orderMode === 'reviews-first' && !this.config.query && (filterMode === 'due+new' || filterMode === 'all')) {
 				const dueParts = [deckName, 'is:due', suspendedClause].filter(Boolean);
 				const dueQuery = dueParts.join(' ');
 				const dueIds = await this.client.findCards(dueQuery);
@@ -807,6 +819,20 @@ export class DeckPlayer {
 				void this.openDeckInAnki();
 			};
 		}
+
+		if (this.cards.length > 0 && this.cards[this.currentIndex]) {
+			const currentCard = this.cards[this.currentIndex];
+			const moreBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: '⋯ card actions',
+				attr: { title: 'Card actions: Copy link, create Obsidian note, open in Anki' },
+			});
+			moreBtn.onclick = (evt: MouseEvent) => {
+				if (currentCard) {
+					this.showCardContextMenu(evt, currentCard);
+				}
+			};
+		}
 	}
 
 	private async openDeckInAnki(): Promise<void> {
@@ -988,6 +1014,10 @@ export class DeckPlayer {
 			cardEl.style.minHeight = this.settings.minCardHeight;
 		}
 
+		cardEl.addEventListener('contextmenu', (evt: MouseEvent) => {
+			this.showCardContextMenu(evt, card);
+		});
+
 		const shouldUseCardStyles = this.config.styles ?? this.settings.useCardStyles;
 
 		if (shouldUseCardStyles && typeof cardEl.attachShadow === 'function') {
@@ -1080,6 +1110,10 @@ ${normalizedCss}
 				const ordClass = typeof card.ord === 'number' ? `card${card.ord + 1}` : '';
 				const cardContainer = (shadow as Node).createDiv({
 					cls: `card ${ordClass} ${isNightMode ? 'nightMode night_mode' : ''}`.trim(),
+				});
+
+				cardContainer.addEventListener('contextmenu', (evt: MouseEvent) => {
+					this.showCardContextMenu(evt, card);
 				});
 
 				const isCloze = isClozeCard(card);
@@ -1249,6 +1283,141 @@ ${normalizedCss}
 		const activeDeck = card?.deckName || this.config.deck;
 		await this.updateCounts(activeDeck);
 		await this.renderCurrentCard();
+	}
+
+	private cleanHtmlToText(html: string): string {
+		return html
+			.replace(/<style[\s\S]*?<\/style>/gi, '')
+			.replace(/<script[\s\S]*?<\/script>/gi, '')
+			.replace(/<[^>]+>/g, ' ')
+			.replace(/\[\.\.\.\]/g, '___')
+			.replace(/&nbsp;/gi, ' ')
+			.replace(/&amp;/gi, '&')
+			.replace(/&lt;/gi, '<')
+			.replace(/&gt;/gi, '>')
+			.replace(/&quot;/gi, '"')
+			.replace(/&#39;/gi, "'")
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
+	private showCardContextMenu(evt: MouseEvent, card: AnkiCardInfo) {
+		evt.preventDefault();
+		evt.stopPropagation();
+
+		const menu = new Menu();
+
+		const rawTitle = card.fields?.Front?.value || card.question || `Card ${card.cardId}`;
+		const plainTitle = this.cleanHtmlToText(rawTitle).slice(0, 40) || `Card ${card.cardId}`;
+
+		menu.addItem((item) => {
+			item.setTitle('🔗 Copy link to card')
+				.setIcon('link')
+				.onClick(() => {
+					const link = `[Anki: ${plainTitle}](obsidian://anki-card?cardId=${card.cardId})`;
+					void navigator.clipboard.writeText(link).then(() => {
+						new Notice('✅ Copied card link to clipboard');
+					});
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('📋 Copy card embed code')
+				.setIcon('code')
+				.onClick(() => {
+					const code = `\`\`\`anki\ncard: ${card.cardId}\n\`\`\``;
+					void navigator.clipboard.writeText(code).then(() => {
+						new Notice('✅ Copied card embed codeblock to clipboard');
+					});
+				});
+		});
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('📝 Create Obsidian note from card')
+				.setIcon('file-plus')
+				.onClick(() => {
+					void this.createNoteFromCard(card);
+				});
+		});
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('Open card in Anki desktop browser')
+				.setIcon('external-link')
+				.onClick(() => {
+					void this.client.guiBrowse(`cid:${card.cardId}`);
+				});
+		});
+
+		menu.showAtMouseEvent(evt);
+	}
+
+	private async createNoteFromCard(card: AnkiCardInfo): Promise<void> {
+		if (!this.app) {
+			new Notice('Cannot create note: Obsidian app reference not available.');
+			return;
+		}
+
+		try {
+			const rawTitle = card.fields?.Front?.value || card.question || `Anki Card ${card.cardId}`;
+			const plainTitle = this.cleanHtmlToText(rawTitle)
+				.replace(/[\\/:*?"<>|#^[\]]/g, '')
+				.trim();
+
+			const titleSnippet = plainTitle.slice(0, 50).trim() || `Anki Card ${card.cardId}`;
+			let filename = `${titleSnippet}.md`;
+
+			let counter = 1;
+			while (this.app.vault.getAbstractFileByPath(filename)) {
+				filename = `${titleSnippet} (${counter}).md`;
+				counter++;
+			}
+
+			const deckName = card.deckName || this.config.deck || 'Anki';
+			const cleanQuestion = this.cleanHtmlToText(card.question);
+			const cleanAnswer = this.cleanHtmlToText(card.answer);
+
+			const noteContent = `---
+anki-card-id: ${card.cardId}
+anki-note-id: ${card.note ?? ''}
+deck: "${deckName}"
+tags:
+  - anki
+---
+
+# ${plainTitle.slice(0, 80)}
+
+> [!info] Anki Card Details
+> **Deck**: ${deckName}
+> **Card ID**: \`${card.cardId}\`
+> [▶️ Review this card in Anki Embed](obsidian://anki-card?cardId=${card.cardId})
+
+\`\`\`anki
+card: ${card.cardId}
+\`\`\`
+
+## Question
+${cleanQuestion}
+
+## Answer
+${cleanAnswer}
+
+## Personal Notes
+
+`;
+
+			const file = await this.app.vault.create(filename, noteContent);
+			new Notice(`✅ Created note: ${file.basename}`);
+
+			const leaf = this.app.workspace.getLeaf('tab');
+			await leaf.openFile(file);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`❌ Failed to create note: ${msg}`);
+		}
 	}
 
 	private renderCompleted() {

@@ -34,6 +34,8 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
 
 export interface DeckEmbedConfig {
+	card?: number;
+	cardId?: number;
 	deck?: string;
 	query?: string;
 	limit?: number;

@@ -72,13 +72,38 @@ export default class AnkiEmbedPlugin extends Plugin {
 				(cfg) => {
 					void this.activateView(cfg);
 				},
-				false
+				false,
+				undefined,
+				this.app
 			);
 			void player.init();
 		};
 
 		this.registerMarkdownCodeBlockProcessor('anki', renderCodeBlock);
 		this.registerMarkdownCodeBlockProcessor('anki-embed', renderCodeBlock);
+
+		// Register obsidian:// protocol handlers for clickable card links
+		this.registerObsidianProtocolHandler('anki-card', (params) => {
+			const cardId = params['cardId'] || params['card'] || params['cid'];
+			if (cardId) {
+				const num = Number.parseInt(cardId, 10);
+				if (!Number.isNaN(num) && num > 0) {
+					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false });
+				}
+			}
+		});
+
+		this.registerObsidianProtocolHandler('anki-embed', (params) => {
+			const cardId = params['cardId'] || params['card'] || params['cid'];
+			if (cardId) {
+				const num = Number.parseInt(cardId, 10);
+				if (!Number.isNaN(num) && num > 0) {
+					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false });
+				}
+			} else if (params['deck']) {
+				void this.activateView({ deck: params['deck'], select: false });
+			}
+		});
 
 		// Commands
 		this.addCommand({

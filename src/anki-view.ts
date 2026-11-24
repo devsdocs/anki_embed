@@ -26,6 +26,9 @@ export class AnkiView extends ItemView {
 	}
 
 	getDisplayText(): string {
+		if (this.config.card ?? this.config.cardId) {
+			return `Anki: Card ${this.config.card ?? this.config.cardId}`;
+		}
 		if (this.config.deck) {
 			return `Anki: ${this.config.deck}`;
 		}
@@ -69,12 +72,17 @@ export class AnkiView extends ItemView {
 		if (state && typeof state === 'object') {
 			const s = state as Partial<DeckEmbedConfig>;
 			this.config = {
+				card: typeof s.card === 'number' ? s.card : undefined,
+				cardId: typeof s.cardId === 'number' ? s.cardId : undefined,
 				deck: typeof s.deck === 'string' ? s.deck : undefined,
 				query: typeof s.query === 'string' ? s.query : undefined,
 				limit: typeof s.limit === 'number' ? s.limit : undefined,
-				filter: s.filter === 'all' || s.filter === 'due' || s.filter === 'new' ? s.filter : undefined,
+				filter: s.filter,
 				randomize: typeof s.randomize === 'boolean' ? s.randomize : undefined,
 				select: typeof s.select === 'boolean' ? s.select : undefined,
+				excludeSuspended: typeof s.excludeSuspended === 'boolean' ? s.excludeSuspended : undefined,
+				order: s.order,
+				counts: typeof s.counts === 'boolean' ? s.counts : undefined,
 			};
 		}
 		await super.setState(state, result);
@@ -83,6 +91,8 @@ export class AnkiView extends ItemView {
 
 	override getState(): Record<string, unknown> {
 		return {
+			card: this.config.card,
+			cardId: this.config.cardId,
 			deck: this.config.deck,
 			query: this.config.query,
 			limit: this.config.limit,
@@ -111,7 +121,8 @@ export class AnkiView extends ItemView {
 				this.config.deck = deck;
 				this.config.select = false;
 				this.app.workspace.requestSaveLayout();
-			}
+			},
+			this.app
 		);
 		void this.player.init();
 	}

@@ -97,6 +97,15 @@ assert.strictEqual(configCountsFalse.counts, false);
 const configStatsTrue = parseDeckConfig('stats: yes');
 assert.strictEqual(configStatsTrue.counts, true);
 
+// 3i. Test parseDeckConfig - card / cid format
+const configCard = parseDeckConfig('card: 172948294829');
+assert.strictEqual(configCard.card, 172948294829);
+assert.strictEqual(configCard.cardId, 172948294829);
+
+const configCid = parseDeckConfig('cid: 987654321');
+assert.strictEqual(configCid.card, 987654321);
+assert.strictEqual(configCid.cardId, 987654321);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
