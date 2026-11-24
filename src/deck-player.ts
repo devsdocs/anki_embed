@@ -105,8 +105,15 @@ export class DeckPlayer {
 	}
 
 	private buildQuery(): string {
+		const shouldExcludeSuspended = this.config.excludeSuspended ?? this.settings.excludeSuspended;
+		const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
+
 		if (this.config.query) {
-			return this.config.query;
+			let q = this.config.query;
+			if (shouldExcludeSuspended && !q.includes('is:suspended')) {
+				q = `${q} -is:suspended`;
+			}
+			return q;
 		}
 
 		const deckName = this.config.deck ? `deck:"${this.config.deck}"` : '';
@@ -117,10 +124,35 @@ export class DeckPlayer {
 			filterClause = 'is:due';
 		} else if (filterMode === 'new') {
 			filterClause = 'is:new';
+		} else if (filterMode === 'due+new') {
+			filterClause = '(is:due or is:new)';
 		}
 
-		const parts = [deckName, filterClause].filter(Boolean);
-		return parts.length > 0 ? parts.join(' ') : 'is:due';
+		const parts = [deckName, filterClause, suspendedClause].filter(Boolean);
+		return parts.length > 0 ? parts.join(' ') : (shouldExcludeSuspended ? '-is:suspended' : 'is:due');
+	}
+
+	private sortReviewsFirst(cards: AnkiCardInfo[], randomize: boolean = false): AnkiCardInfo[] {
+		const reviews: AnkiCardInfo[] = [];
+		const newCards: AnkiCardInfo[] = [];
+
+		for (const card of cards) {
+			const isReview = (card.type !== undefined && card.type > 0) || 
+			                 (card.queue !== undefined && card.queue > 0) || 
+			                 ((card.reviews ?? card.reps ?? 0) > 0);
+			if (isReview) {
+				reviews.push(card);
+			} else {
+				newCards.push(card);
+			}
+		}
+
+		if (randomize) {
+			reviews.sort(() => Math.random() - 0.5);
+			newCards.sort(() => Math.random() - 0.5);
+		}
+
+		return [...reviews, ...newCards];
 	}
 
 	public async loadCards(): Promise<void> {
@@ -146,10 +178,70 @@ export class DeckPlayer {
 		}
 
 		try {
-			const query = this.buildQuery();
-			const cardIds = await this.client.findCards(query);
+			const orderMode = this.config.order ?? this.settings.cardOrder;
+			const shouldRandomize = this.config.randomize ?? this.settings.randomizeCards;
+			const limit = this.config.limit ?? this.settings.defaultLimit;
+			const filterMode = this.config.filter ?? this.settings.defaultFilter;
+			const shouldExcludeSuspended = this.config.excludeSuspended ?? this.settings.excludeSuspended;
+			const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
+			const deckName = this.config.deck ? `deck:"${this.config.deck}"` : '';
 
-			if (!cardIds || cardIds.length === 0) {
+			let selectedIds: number[] = [];
+
+			// If reviews-first and studying due+new or all without custom query: prioritize due IDs up to limit
+			if (orderMode === 'reviews-first' && !this.config.query && (filterMode === 'due+new' || filterMode === 'all')) {
+				const dueParts = [deckName, 'is:due', suspendedClause].filter(Boolean);
+				const dueQuery = dueParts.join(' ');
+				const dueIds = await this.client.findCards(dueQuery);
+
+				let pickedDue = dueIds;
+				if (shouldRandomize) {
+					pickedDue = [...dueIds].sort(() => Math.random() - 0.5);
+				}
+				if (limit > 0 && pickedDue.length > limit) {
+					pickedDue = pickedDue.slice(0, limit);
+				}
+
+				selectedIds.push(...pickedDue);
+
+				const remainingLimit = limit > 0 ? limit - selectedIds.length : 0;
+				if (remainingLimit > 0 || limit <= 0) {
+					const newParts = [deckName, 'is:new', suspendedClause].filter(Boolean);
+					const newQuery = newParts.join(' ');
+					const newIds = await this.client.findCards(newQuery);
+
+					let pickedNew = newIds;
+					if (shouldRandomize) {
+						pickedNew = [...newIds].sort(() => Math.random() - 0.5);
+					}
+					if (limit > 0 && pickedNew.length > remainingLimit) {
+						pickedNew = pickedNew.slice(0, remainingLimit);
+					}
+					selectedIds.push(...pickedNew);
+				}
+			} else {
+				const query = this.buildQuery();
+				const cardIds = await this.client.findCards(query);
+
+				if (!cardIds || cardIds.length === 0) {
+					if (requestId !== this.loadRequestId) return;
+					this.cards = [];
+					this.isLoading = false;
+					this.renderEmpty();
+					return;
+				}
+
+				selectedIds = cardIds;
+				if (shouldRandomize && orderMode !== 'reviews-first') {
+					selectedIds = [...cardIds].sort(() => Math.random() - 0.5);
+				}
+
+				if (limit > 0 && selectedIds.length > limit) {
+					selectedIds = selectedIds.slice(0, limit);
+				}
+			}
+
+			if (selectedIds.length === 0) {
 				if (requestId !== this.loadRequestId) return;
 				this.cards = [];
 				this.isLoading = false;
@@ -157,21 +249,18 @@ export class DeckPlayer {
 				return;
 			}
 
-			let selectedIds = cardIds;
-			const shouldRandomize = this.config.randomize ?? this.settings.randomizeCards;
-			if (shouldRandomize) {
-				selectedIds = [...cardIds].sort(() => Math.random() - 0.5);
-			}
-
-			const limit = this.config.limit ?? this.settings.defaultLimit;
-			if (limit > 0 && selectedIds.length > limit) {
-				selectedIds = selectedIds.slice(0, limit);
-			}
-
 			const cards = await this.client.getCardsInfo(selectedIds);
 
 			if (requestId !== this.loadRequestId) return;
-			this.cards = cards;
+
+			let finalCards = cards;
+			if (orderMode === 'reviews-first') {
+				finalCards = this.sortReviewsFirst(cards, shouldRandomize);
+			} else if (shouldRandomize) {
+				finalCards = [...cards].sort(() => Math.random() - 0.5);
+			}
+
+			this.cards = finalCards;
 			this.isLoading = false;
 
 			if (this.cards.length === 0) {

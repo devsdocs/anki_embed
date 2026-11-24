@@ -66,6 +66,27 @@ assert.strictEqual(configSyncLive.live, true);
 const configLiveFalse = parseDeckConfig('live: false');
 assert.strictEqual(configLiveFalse.live, false);
 
+// 3e. Test parseDeckConfig - filter due+new
+const configDueNew = parseDeckConfig('filter: due+new');
+assert.strictEqual(configDueNew.filter, 'due+new');
+
+const configBoth = parseDeckConfig('filter: both');
+assert.strictEqual(configBoth.filter, 'due+new');
+
+// 3f. Test parseDeckConfig - suspended format
+const configNoSuspended = parseDeckConfig('suspended: false');
+assert.strictEqual(configNoSuspended.excludeSuspended, true);
+
+const configWithSuspended = parseDeckConfig('suspended: true');
+assert.strictEqual(configWithSuspended.excludeSuspended, false);
+
+// 3g. Test parseDeckConfig - order format
+const configReviewsFirst = parseDeckConfig('order: reviews-first');
+assert.strictEqual(configReviewsFirst.order, 'reviews-first');
+
+const configOrderRandom = parseDeckConfig('order: random');
+assert.strictEqual(configOrderRandom.order, 'random');
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
@@ -147,9 +168,11 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true and liveSync: false
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first'
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
+assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
+assert.strictEqual(DEFAULT_SETTINGS.cardOrder, 'reviews-first');
 
 console.log('✅ All verification tests passed successfully!');
 

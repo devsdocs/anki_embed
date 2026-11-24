@@ -29,9 +29,11 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 				}
 				hasKeyValue = true;
 			} else if (key === 'filter') {
-				const f = val.toLowerCase();
+				const f = val.toLowerCase().replace(/\s+/g, '');
 				if (['all', 'due', 'new'].includes(f)) {
 					config.filter = f as 'all' | 'due' | 'new';
+				} else if (['due+new', 'due_new', 'both', 'study', 'dueandnew'].includes(f)) {
+					config.filter = 'due+new';
 				}
 				hasKeyValue = true;
 			} else if (key === 'randomize' || key === 'shuffle') {
@@ -54,6 +56,24 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 					config.live = true;
 				} else if (['false', '0', 'no', 'off', 'none'].includes(valLower)) {
 					config.live = false;
+				}
+				hasKeyValue = true;
+			} else if (key === 'suspended' || key === 'excludesuspended' || key === 'exclude_suspended' || key === 'unsuspended') {
+				const valLower = val.toLowerCase();
+				if (key === 'suspended') {
+					config.excludeSuspended = !(valLower === 'true' || valLower === '1' || valLower === 'yes');
+				} else {
+					config.excludeSuspended = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				}
+				hasKeyValue = true;
+			} else if (key === 'order' || key === 'sort') {
+				const valLower = val.toLowerCase().replace(/[\s_]+/g, '-');
+				if (['reviews-first', 'reviews', 'review-first', 'due-first'].includes(valLower)) {
+					config.order = 'reviews-first';
+				} else if (['random', 'shuffle'].includes(valLower)) {
+					config.order = 'random';
+				} else if (['default', 'deck'].includes(valLower)) {
+					config.order = 'default';
 				}
 				hasKeyValue = true;
 			}

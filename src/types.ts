@@ -1,13 +1,18 @@
+export type AnkiCardFilter = 'all' | 'due' | 'new' | 'due+new';
+export type AnkiCardOrder = 'reviews-first' | 'random' | 'default';
+
 export interface AnkiEmbedSettings {
 	ankiConnectUrl: string;
 	apiKey: string;
 	defaultLimit: number;
-	defaultFilter: 'all' | 'due' | 'new';
+	defaultFilter: AnkiCardFilter;
 	randomizeCards: boolean;
 	minCardHeight: string;
 	useCustomAnkiConnect: boolean;
 	useCardStyles: boolean;
 	liveSync: boolean;
+	excludeSuspended: boolean;
+	cardOrder: AnkiCardOrder;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -20,6 +25,8 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	useCustomAnkiConnect: false,
 	useCardStyles: true,
 	liveSync: false,
+	excludeSuspended: true,
+	cardOrder: 'reviews-first',
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -28,11 +35,13 @@ export interface DeckEmbedConfig {
 	deck?: string;
 	query?: string;
 	limit?: number;
-	filter?: 'all' | 'due' | 'new';
+	filter?: AnkiCardFilter;
 	randomize?: boolean;
 	select?: boolean;
 	styles?: boolean;
 	live?: boolean;
+	excludeSuspended?: boolean;
+	order?: AnkiCardOrder;
 	[key: string]: unknown;
 }
 
@@ -54,6 +63,7 @@ export interface AnkiCardInfo {
 	interval?: number;
 	lapses?: number;
 	reviews?: number;
+	reps?: number;
 	queue?: number;
 	type?: number;
 	left?: number;

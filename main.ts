@@ -211,7 +211,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.defaultLimit = DEFAULT_SETTINGS.defaultLimit;
 			repaired = true;
 		}
-		if (!['all', 'due', 'new'].includes(this.settings.defaultFilter)) {
+		if (!['all', 'due', 'new', 'due+new'].includes(this.settings.defaultFilter)) {
 			this.settings.defaultFilter = DEFAULT_SETTINGS.defaultFilter;
 			repaired = true;
 		}
@@ -233,6 +233,14 @@ export default class AnkiEmbedPlugin extends Plugin {
 		}
 		if (typeof this.settings.liveSync !== 'boolean') {
 			this.settings.liveSync = DEFAULT_SETTINGS.liveSync;
+			repaired = true;
+		}
+		if (typeof this.settings.excludeSuspended !== 'boolean') {
+			this.settings.excludeSuspended = DEFAULT_SETTINGS.excludeSuspended;
+			repaired = true;
+		}
+		if (!['reviews-first', 'random', 'default'].includes(this.settings.cardOrder)) {
+			this.settings.cardOrder = DEFAULT_SETTINGS.cardOrder;
 			repaired = true;
 		}
 
@@ -306,9 +314,33 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							defaultValue: DEFAULT_SETTINGS.defaultFilter,
 							options: {
 								all: 'All cards',
+								'due+new': 'Due and new cards',
 								due: 'Due cards only',
 								new: 'New cards only',
 							},
+						},
+					},
+					{
+						name: 'Card study order',
+						desc: 'Determine which cards appear first in review sessions.',
+						control: {
+							type: 'dropdown',
+							key: 'cardOrder',
+							defaultValue: DEFAULT_SETTINGS.cardOrder,
+							options: {
+								'reviews-first': 'Reviews first (due reviews before new cards)',
+								random: 'Randomized mix',
+								default: 'Deck order',
+							},
+						},
+					},
+					{
+						name: 'Exclude suspended cards',
+						desc: 'Automatically exclude suspended cards (-is:suspended) from study sessions.',
+						control: {
+							type: 'toggle',
+							key: 'excludeSuspended',
+							defaultValue: DEFAULT_SETTINGS.excludeSuspended,
 						},
 					},
 					{
