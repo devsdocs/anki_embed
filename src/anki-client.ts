@@ -257,8 +257,8 @@ export class AnkiClient {
 		return await this.request<number>('getNumCardsReviewedToday');
 	}
 
-	public async getNumCardsReviewedByDay(): Promise<[string, number, number, number, number][]> {
-		return await this.request<[string, number, number, number, number][]>('getNumCardsReviewedByDay');
+	public async getNumCardsReviewedByDay(): Promise<[string, number][]> {
+		return await this.request<[string, number][]>('getNumCardsReviewedByDay');
 	}
 
 	public async getCollectionStatsHTML(): Promise<string> {

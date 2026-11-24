@@ -80,6 +80,10 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 				const valLower = val.toLowerCase();
 				config.counts = valLower === 'true' || valLower === '1' || valLower === 'yes';
 				hasKeyValue = true;
+			} else if (key === 'heatmap' || key === 'showheatmap' || key === 'show_heatmap') {
+				const valLower = val.toLowerCase();
+				config.heatmap = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
 			} else if (key === 'card' || key === 'cardid' || key === 'cid') {
 				const num = Number.parseInt(val, 10);
 				if (!Number.isNaN(num) && num > 0) {

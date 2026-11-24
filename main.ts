@@ -272,6 +272,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.showCardCounts = DEFAULT_SETTINGS.showCardCounts;
 			repaired = true;
 		}
+		if (typeof this.settings.showHeatmap !== 'boolean') {
+			this.settings.showHeatmap = DEFAULT_SETTINGS.showHeatmap;
+			repaired = true;
+		}
 
 		if (repaired) {
 			await this.saveData(this.settings);
@@ -379,6 +383,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'showCardCounts',
 							defaultValue: DEFAULT_SETTINGS.showCardCounts,
+						},
+					},
+					{
+						name: 'Show review heatmap',
+						desc: 'Display an Anki review activity heatmap on the deck selection screen.',
+						control: {
+							type: 'toggle',
+							key: 'showHeatmap',
+							defaultValue: DEFAULT_SETTINGS.showHeatmap,
 						},
 					},
 					{

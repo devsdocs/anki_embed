@@ -625,10 +625,215 @@ export class DeckPlayer {
 					void this.loadCards();
 				}
 			};
+
+			const shouldShowHeatmap = this.config.heatmap ?? this.settings.showHeatmap;
+			if (shouldShowHeatmap) {
+				const heatmapContainer = pickerDiv.createDiv({ cls: 'anki-embed-heatmap-section' });
+				void this.renderReviewHeatmap(heatmapContainer);
+			}
 		} catch (err: unknown) {
 			if (requestId !== this.loadRequestId) return;
 			const msg = err instanceof Error ? err.message : String(err);
 			this.renderError(msg);
+		}
+	}
+
+	private async renderReviewHeatmap(container: HTMLElement): Promise<void> {
+		const card = container.createDiv({ cls: 'anki-embed-heatmap-card' });
+		const loader = card.createDiv({ cls: 'anki-embed-empty', text: '📅 Loading review heatmap...' });
+
+		try {
+			const dailyReviews = await this.client.getNumCardsReviewedByDay();
+			loader.remove();
+
+			if (!dailyReviews || dailyReviews.length === 0) {
+				card.createDiv({ cls: 'anki-embed-empty', text: 'No review history found in Anki.' });
+				return;
+			}
+
+			const reviewMap = new Map<string, number>();
+			let maxDaily = 0;
+			let totalReviews = 0;
+			for (const [dateStr, count] of dailyReviews) {
+				const num = Number(count) || 0;
+				reviewMap.set(dateStr, num);
+				totalReviews += num;
+				if (num > maxDaily) {
+					maxDaily = num;
+				}
+			}
+
+			const formatDateKey = (d: Date): string => {
+				const y = d.getFullYear();
+				const m = String(d.getMonth() + 1).padStart(2, '0');
+				const day = String(d.getDate()).padStart(2, '0');
+				return `${y}-${m}-${day}`;
+			};
+
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStr = formatDateKey(today);
+			const todayCount = reviewMap.get(todayStr) ?? 0;
+
+			// Current streak
+			let currentStreak = 0;
+			const checkDate = new Date(today);
+			if (todayCount === 0) {
+				checkDate.setDate(checkDate.getDate() - 1);
+			}
+			while (true) {
+				const key = formatDateKey(checkDate);
+				const c = reviewMap.get(key) ?? 0;
+				if (c > 0) {
+					currentStreak++;
+					checkDate.setDate(checkDate.getDate() - 1);
+				} else {
+					break;
+				}
+			}
+
+			// Longest streak
+			let longestStreak = 0;
+			let tempStreak = 0;
+			let prevDate: Date | null = null;
+			const sortedDates = Array.from(reviewMap.keys()).sort();
+			for (const dStr of sortedDates) {
+				const c = reviewMap.get(dStr) ?? 0;
+				if (c <= 0) continue;
+				const parts = dStr.split('-').map(Number);
+				if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) continue;
+				const curDate = new Date(parts[0], parts[1] - 1, parts[2]);
+
+				if (prevDate) {
+					const diffDays = Math.round((curDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24));
+					if (diffDays === 1) {
+						tempStreak++;
+					} else if (diffDays > 1) {
+						tempStreak = 1;
+					}
+				} else {
+					tempStreak = 1;
+				}
+				prevDate = curDate;
+				if (tempStreak > longestStreak) {
+					longestStreak = tempStreak;
+				}
+			}
+			if (currentStreak > longestStreak) {
+				longestStreak = currentStreak;
+			}
+
+			// Header with Title and Stats
+			const header = card.createDiv({ cls: 'anki-embed-heatmap-header' });
+			const titleDiv = header.createDiv({ cls: 'anki-embed-heatmap-title' });
+			titleDiv.setText('🔥 Review activity');
+
+			const statsDiv = header.createDiv({ cls: 'anki-embed-heatmap-stats' });
+
+			const addStat = (val: number | string, label: string) => {
+				const statBox = statsDiv.createDiv({ cls: 'anki-heatmap-stat' });
+				statBox.createSpan({ cls: 'stat-value', text: String(val) });
+				statBox.createSpan({ cls: 'stat-label', text: label });
+			};
+
+			addStat(currentStreak, 'Streak');
+			addStat(longestStreak, 'Longest');
+			addStat(todayCount, 'Today');
+			addStat(totalReviews, 'Total');
+
+			// Heatmap Grid: 40 weeks back (~9 months)
+			const totalWeeks = 40;
+			const dayOfWeek = today.getDay(); // 0 is Sunday
+			const endSaturday = new Date(today);
+			endSaturday.setDate(today.getDate() + (6 - dayOfWeek));
+
+			const startSunday = new Date(endSaturday);
+			startSunday.setDate(endSaturday.getDate() - (totalWeeks * 7 - 1));
+
+			const scrollWrapper = card.createDiv({ cls: 'anki-embed-heatmap-scroll' });
+			const monthsRow = scrollWrapper.createDiv({ cls: 'anki-heatmap-months' });
+
+			const gridContainer = scrollWrapper.createDiv({ cls: 'anki-heatmap-grid-container' });
+
+			// Day labels
+			const dayLabels = gridContainer.createDiv({ cls: 'anki-heatmap-day-labels' });
+			const dayNames = ['', 'M', '', 'W', '', 'F', ''];
+			for (const dn of dayNames) {
+				dayLabels.createDiv({ text: dn });
+			}
+
+			const grid = gridContainer.createDiv({ cls: 'anki-heatmap-grid' });
+
+			let lastMonth = -1;
+			const iterDate = new Date(startSunday);
+			for (let w = 0; w < totalWeeks; w++) {
+				const weekDiv = grid.createDiv({ cls: 'anki-heatmap-week' });
+
+				const curMonth = iterDate.getMonth();
+				if (curMonth !== lastMonth) {
+					lastMonth = curMonth;
+					const monthName = iterDate.toLocaleDateString(undefined, { month: 'short' });
+					monthsRow.createSpan({
+						cls: 'anki-heatmap-month-label',
+						text: monthName,
+						attr: { style: 'width: calc(14px * 4);' },
+					});
+				}
+
+				for (let d = 0; d < 7; d++) {
+					const cellDate = new Date(iterDate);
+					const dateKey = formatDateKey(cellDate);
+					const isFuture = cellDate.getTime() > today.getTime();
+					const count = reviewMap.get(dateKey) ?? 0;
+
+					let level = 0;
+					if (count > 0) {
+						if (maxDaily <= 10) {
+							level = count >= 6 ? 4 : count >= 4 ? 3 : count >= 2 ? 2 : 1;
+						} else {
+							const ratio = count / maxDaily;
+							level = ratio > 0.6 ? 4 : ratio > 0.3 ? 3 : ratio > 0.1 ? 2 : 1;
+						}
+					}
+
+					const formattedDate = cellDate.toLocaleDateString(undefined, {
+						month: 'short',
+						day: 'numeric',
+						year: 'numeric',
+					});
+					const title = count > 0
+						? `${count} cards reviewed on ${formattedDate}`
+						: `No reviews on ${formattedDate}`;
+
+					const cell = weekDiv.createDiv({
+						cls: `anki-heatmap-cell ${isFuture ? 'is-future' : ''}`,
+						attr: {
+							'data-level': String(level),
+							title,
+						},
+					});
+
+					if (dateKey === todayStr) {
+						cell.addClass('is-today');
+					}
+
+					iterDate.setDate(iterDate.getDate() + 1);
+				}
+			}
+
+			// Footer with legend
+			const footer = card.createDiv({ cls: 'anki-embed-heatmap-footer' });
+			footer.createSpan({ cls: 'anki-heatmap-legend-label', text: 'Less' });
+			for (let lvl = 0; lvl <= 4; lvl++) {
+				footer.createSpan({ cls: 'anki-heatmap-cell', attr: { 'data-level': String(lvl) } });
+			}
+			footer.createSpan({ cls: 'anki-heatmap-legend-label', text: 'More' });
+
+			window.setTimeout(() => {
+				scrollWrapper.scrollLeft = scrollWrapper.scrollWidth;
+			}, 50);
+		} catch {
+			loader.setText('Could not connect to Anki to load review history.');
 		}
 	}
 

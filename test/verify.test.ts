@@ -106,6 +106,13 @@ const configCid = parseDeckConfig('cid: 987654321');
 assert.strictEqual(configCid.card, 987654321);
 assert.strictEqual(configCid.cardId, 987654321);
 
+// 3j. Test parseDeckConfig - heatmap format
+const configHeatmapTrue = parseDeckConfig('heatmap: true');
+assert.strictEqual(configHeatmapTrue.heatmap, true);
+
+const configHeatmapFalse = parseDeckConfig('heatmap: false');
+assert.strictEqual(configHeatmapFalse.heatmap, false);
+
 // 4. Test parsePastedAnkiText
 const paste1 = parsePastedAnkiText('anki://deck/Japanese%20Kanji');
 assert.deepStrictEqual(paste1, { deckName: 'Japanese Kanji' });
@@ -187,12 +194,13 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
 assert.strictEqual(DEFAULT_SETTINGS.cardOrder, 'reviews-first');
 assert.strictEqual(DEFAULT_SETTINGS.showCardCounts, true);
+assert.strictEqual(DEFAULT_SETTINGS.showHeatmap, true);
 
 console.log('✅ All verification tests passed successfully!');
 

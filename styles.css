@@ -401,6 +401,203 @@
 	color: var(--text-normal);
 }
 
+/* Review Heatmap */
+.anki-embed-heatmap-card {
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 8px);
+	padding: 14px 16px;
+	margin-top: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	box-sizing: border-box;
+	width: 100%;
+}
+
+.anki-embed-heatmap-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	font-size: 0.9em;
+}
+
+.anki-embed-heatmap-title {
+	font-weight: 600;
+	color: var(--text-normal);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.anki-embed-heatmap-stats {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.anki-heatmap-stat {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 3px 8px;
+	min-width: 48px;
+}
+
+.anki-heatmap-stat .stat-value {
+	font-weight: 700;
+	font-size: 1.05em;
+	color: var(--interactive-accent);
+}
+
+.anki-heatmap-stat .stat-label {
+	font-size: 0.7em;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.anki-embed-heatmap-scroll {
+	overflow-x: auto;
+	overflow-y: hidden;
+	padding-bottom: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.anki-heatmap-months {
+	display: flex;
+	height: 16px;
+	font-size: 0.72em;
+	color: var(--text-muted);
+	user-select: none;
+	padding-left: 28px;
+}
+
+.anki-heatmap-month-label {
+	flex-shrink: 0;
+	white-space: nowrap;
+}
+
+.anki-heatmap-grid-container {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+}
+
+.anki-heatmap-day-labels {
+	display: grid;
+	grid-template-rows: repeat(7, 11px);
+	gap: 3px;
+	font-size: 0.68em;
+	color: var(--text-muted);
+	user-select: none;
+	width: 20px;
+	text-align: right;
+	line-height: 11px;
+}
+
+.anki-heatmap-grid {
+	display: flex;
+	gap: 3px;
+	align-items: center;
+}
+
+.anki-heatmap-week {
+	display: grid;
+	grid-template-rows: repeat(7, 11px);
+	gap: 3px;
+	flex-shrink: 0;
+}
+
+.anki-heatmap-cell {
+	width: 11px;
+	height: 11px;
+	border-radius: 2px;
+	box-sizing: border-box;
+	cursor: pointer;
+	transition: transform 0.1s ease, outline 0.1s ease;
+}
+
+.anki-heatmap-cell:hover {
+	outline: 1.5px solid var(--interactive-accent);
+	transform: scale(1.2);
+	z-index: 2;
+}
+
+.anki-heatmap-cell.is-today {
+	outline: 1.5px solid var(--interactive-accent);
+}
+
+.anki-heatmap-cell.is-future {
+	visibility: hidden;
+}
+
+/* Heatmap cell levels - Light mode */
+.anki-heatmap-cell[data-level="0"] {
+	background-color: var(--background-modifier-border);
+	opacity: 0.45;
+}
+
+.anki-heatmap-cell[data-level="1"] {
+	background-color: #86efac;
+}
+
+.anki-heatmap-cell[data-level="2"] {
+	background-color: #4ade80;
+}
+
+.anki-heatmap-cell[data-level="3"] {
+	background-color: #22c55e;
+}
+
+.anki-heatmap-cell[data-level="4"] {
+	background-color: #15803d;
+}
+
+/* Dark mode cell levels */
+.theme-dark .anki-heatmap-cell[data-level="0"] {
+	background-color: rgba(255, 255, 255, 0.08);
+	opacity: 1;
+}
+
+.theme-dark .anki-heatmap-cell[data-level="1"] {
+	background-color: #0e4429;
+}
+
+.theme-dark .anki-heatmap-cell[data-level="2"] {
+	background-color: #006d32;
+}
+
+.theme-dark .anki-heatmap-cell[data-level="3"] {
+	background-color: #26a641;
+}
+
+.theme-dark .anki-heatmap-cell[data-level="4"] {
+	background-color: #39d353;
+}
+
+.anki-embed-heatmap-footer {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+	font-size: 0.72em;
+	color: var(--text-muted);
+	margin-top: 2px;
+}
+
+.anki-heatmap-legend-label {
+	margin: 0 4px;
+}
+
 .anki-embed-cloze-interactive {
 	color: var(--interactive-accent);
 	font-weight: bold;

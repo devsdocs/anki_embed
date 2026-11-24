@@ -14,6 +14,7 @@ export interface AnkiEmbedSettings {
 	excludeSuspended: boolean;
 	cardOrder: AnkiCardOrder;
 	showCardCounts: boolean;
+	showHeatmap: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -29,6 +30,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	excludeSuspended: true,
 	cardOrder: 'reviews-first',
 	showCardCounts: true,
+	showHeatmap: true,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -47,6 +49,7 @@ export interface DeckEmbedConfig {
 	excludeSuspended?: boolean;
 	order?: AnkiCardOrder;
 	counts?: boolean;
+	heatmap?: boolean;
 	[key: string]: unknown;
 }
 
