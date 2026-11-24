@@ -1,9 +1,10 @@
-import { App, Editor, Notice, Plugin, PluginSettingTab, WorkspaceLeaf } from 'obsidian';
+import { App, Editor, Notice, Plugin, PluginSettingTab, TFile, WorkspaceLeaf } from 'obsidian';
 import type { SettingDefinitionItem } from 'obsidian';
 import { AnkiClient } from './src/anki-client';
 import { AnkiView } from './src/anki-view';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
+import { TagSelectModal } from './src/tag-modal';
 import { AnkiImportModal } from './src/import-modal';
 import { AnkiRemoteConfigModal } from './src/remote-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
@@ -221,6 +222,70 @@ export default class AnkiEmbedPlugin extends Plugin {
 				new AnkiRemoteConfigModal(this.app, this).open();
 			},
 		});
+
+		this.addCommand({
+			id: 'link-anki-tag-to-current-note',
+			name: 'Link Anki tag to current note',
+			callback: () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice('Please open a note first to link an Anki tag.');
+					return;
+				}
+				new TagSelectModal(this.app, this.client, (tag: string) => {
+					void this.linkTagToNote(activeFile, tag);
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'insert-anki-tag-at-cursor',
+			name: 'Insert Anki tag into editor',
+			editorCallback: (editor: Editor) => {
+				new TagSelectModal(this.app, this.client, (tag: string) => {
+					const cursor = editor.getCursor();
+					editor.replaceRange(`#anki/${tag} `, cursor);
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'search-and-copy-anki-tag',
+			name: 'Search and copy Anki tag',
+			callback: () => {
+				new TagSelectModal(this.app, this.client, (tag: string) => {
+					void navigator.clipboard.writeText(`anki-tag: ${tag}`).then(() => {
+						new Notice(`Copied "anki-tag: ${tag}" to clipboard`);
+					});
+				}).open();
+			},
+		});
+	}
+
+	async linkTagToNote(file: TFile, tag: string): Promise<void> {
+		try {
+			await this.app.fileManager.processFrontMatter(file, (fmData: Record<string, unknown>) => {
+				const existing = fmData['anki-tags'] ?? fmData['anki-tag'] ?? fmData['anki_tags'] ?? fmData['anki_tag'];
+				if (Array.isArray(existing)) {
+					if (!existing.includes(tag)) {
+						existing.push(tag);
+						fmData['anki-tags'] = existing;
+					}
+				} else if (typeof existing === 'string') {
+					if (existing !== tag) {
+						fmData['anki-tags'] = [existing, tag];
+						delete fmData['anki-tag'];
+						delete fmData['anki_tag'];
+					}
+				} else {
+					fmData['anki-tag'] = tag;
+				}
+			});
+			new Notice(`Linked Anki tag "${tag}" to "${file.basename}"`);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to link tag: ${msg}`);
+		}
 	}
 
 	async activateView(config?: DeckEmbedConfig, newTab: boolean = true): Promise<AnkiView> {
@@ -353,6 +418,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 		}
 		if (typeof this.settings.enableBacklinks !== 'boolean') {
 			this.settings.enableBacklinks = DEFAULT_SETTINGS.enableBacklinks;
+			repaired = true;
+		}
+		if (typeof this.settings.enableTagLinks !== 'boolean') {
+			this.settings.enableTagLinks = DEFAULT_SETTINGS.enableTagLinks;
 			repaired = true;
 		}
 		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
@@ -594,6 +663,15 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'enableBacklinks',
 							defaultValue: DEFAULT_SETTINGS.enableBacklinks,
+						},
+					},
+					{
+						name: 'Enable tag-based note linking',
+						desc: 'Automatically link cards to notes in your vault that share matching Anki tags (via anki-tags frontmatter or #anki/... tags).',
+						control: {
+							type: 'toggle',
+							key: 'enableTagLinks',
+							defaultValue: DEFAULT_SETTINGS.enableTagLinks,
 						},
 					},
 					{

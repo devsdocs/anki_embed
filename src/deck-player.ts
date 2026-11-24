@@ -1,12 +1,24 @@
 import { sanitizeHTMLToDom, Notice, Menu, setTooltip, TFile } from 'obsidian';
 import type { App } from 'obsidian';
 import { AnkiClient } from './anki-client';
-import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from './card-html';
+import {
+	extractAnkiTagsFromNote,
+	extractAnkiTagsFromText,
+	extractAnswerHtml,
+	formatCardHtml,
+	isClozeCard,
+	isTagMatch,
+	normalizeAnkiCss,
+	normalizeAnkiTag,
+} from './card-html';
 import { AnkiRemoteConfigModal } from './remote-modal';
 import { NoteSelectModal } from './note-modal';
+import { TagSelectModal } from './tag-modal';
 import {
 	AnkiCardInfo,
 	AnkiEmbedSettings,
+	CardLinkedNotes,
+	CardTagLink,
 	DEFAULT_GAMEPAD_MAPPING,
 	DEFAULT_KEYBOARD_MAPPING,
 	DeckEmbedConfig,
@@ -128,7 +140,8 @@ export class DeckPlayer {
 	private currentCardContainer: HTMLElement | null = null;
 	private currentModelName: string | null = null;
 	private currentFontScale: number | null = null;
-	private linkedNotesCache = new Map<number, { explicit: TFile[]; backlinks: TFile[] }>();
+	private linkedNotesCache = new Map<number, CardLinkedNotes<TFile>>();
+	private cardTagsCache = new Map<number, string[]>();
 	private activeLinksDropdown: HTMLElement | null = null;
 	private linksDropdownCleanup: (() => void) | null = null;
 	private isPollingLiveCard = false;
@@ -2837,9 +2850,25 @@ ${normalizedCss}
 	}
 
 	private extractTagsFromCard(card: AnkiCardInfo): string[] {
+		const cleanedTags = new Set<string>();
+
+		if (card.tags && Array.isArray(card.tags)) {
+			for (const t of card.tags) {
+				const clean = normalizeAnkiTag(t);
+				if (clean) cleanedTags.add(clean);
+			}
+		}
+
+		const cached = this.cardTagsCache.get(card.cardId);
+		if (cached && Array.isArray(cached)) {
+			for (const t of cached) {
+				const clean = normalizeAnkiTag(t);
+				if (clean) cleanedTags.add(clean);
+			}
+		}
+
 		const raw = `${card.question} ${card.answer}`;
 		const tagMatches = raw.match(/#AK_[A-Za-z0-9_:#&/.-]+/g) || [];
-		const cleanedTags = new Set<string>();
 
 		for (const tag of tagMatches) {
 			const clean = tag.replace(/^#+/, '').replace(/::#+/g, '::').trim();
@@ -2849,6 +2878,41 @@ ${normalizedCss}
 		}
 
 		return Array.from(cleanedTags);
+	}
+
+	public getCardTagsSync(cardId: number, card?: AnkiCardInfo): string[] {
+		const c = card || this.cards.find((item) => item.cardId === cardId);
+		if (!c) {
+			return this.cardTagsCache.get(cardId) ?? [];
+		}
+		const tags = this.extractTagsFromCard(c);
+		if (tags.length > 0) {
+			this.cardTagsCache.set(cardId, tags);
+		}
+		return tags;
+	}
+
+	public async ensureCardTagsLoaded(cardId: number, card?: AnkiCardInfo): Promise<string[]> {
+		const syncTags = this.getCardTagsSync(cardId, card);
+		if (syncTags.length > 0) return syncTags;
+
+		try {
+			const res = await this.client.getCardsInfo([cardId]);
+			if (res && res[0]?.tags && Array.isArray(res[0].tags)) {
+				const fetched = res[0].tags.map((t) => normalizeAnkiTag(t)).filter(Boolean);
+				if (fetched.length > 0) {
+					this.cardTagsCache.set(cardId, fetched);
+					const currentCard = this.cards.find((c) => c.cardId === cardId);
+					if (currentCard) {
+						currentCard.tags = res[0].tags;
+					}
+					return fetched;
+				}
+			}
+		} catch {
+			// Ignore network or connection error
+		}
+		return syncTags;
 	}
 
 	private extractCardContent(card: AnkiCardInfo): {
@@ -3264,7 +3328,7 @@ card: ${card.cardId}
 		}
 	}
 
-	public findLinkedNotes(cardId: number, skipFullVaultScan = false): { explicit: TFile[]; backlinks: TFile[] } {
+	public findLinkedNotes(cardId: number, skipFullVaultScan = false): CardLinkedNotes<TFile> {
 		const cached = this.linkedNotesCache.get(cardId);
 		if (cached && !skipFullVaultScan) {
 			return cached;
@@ -3272,7 +3336,8 @@ card: ${card.cardId}
 
 		const explicit: TFile[] = [];
 		const backlinks: TFile[] = [];
-		if (!this.app) return { explicit, backlinks };
+		const tagLinks: CardTagLink<TFile>[] = [];
+		if (!this.app) return { explicit, backlinks, tagLinks };
 
 		const cardIdStr = String(cardId);
 		const seenPaths = new Set<string>();
@@ -3287,12 +3352,16 @@ card: ${card.cardId}
 			}
 		}
 
-		// 2. Fast check of metadataCache frontmatter
+		// 2. Fast check of metadataCache frontmatter & tags
 		const files = this.app.vault.getMarkdownFiles();
 		const shouldScanBacklinks = (this.config.backlinks ?? this.settings.enableBacklinks) && (this.config.links ?? this.settings.enableCardLinks);
+		const shouldScanTagLinks = (this.config.tagLinks ?? this.settings.enableTagLinks) && (this.config.links ?? this.settings.enableCardLinks);
 		const targetUri1 = `cardId=${cardIdStr}`;
 		const targetUri2 = `card=${cardIdStr}`;
 		const targetCid = `cid:${cardIdStr}`;
+
+		const card = this.cards.find((c) => c.cardId === cardId);
+		const cardTags = shouldScanTagLinks ? this.getCardTagsSync(cardId, card) : [];
 
 		for (const file of files) {
 			if (seenPaths.has(file.path)) continue;
@@ -3303,6 +3372,27 @@ card: ${card.cardId}
 				const fm = cache.frontmatter as Record<string, unknown>;
 				if (checkFrontmatterForCardId(fm, cardIdStr)) {
 					explicit.push(file);
+					seenPaths.add(file.path);
+					continue;
+				}
+			}
+
+			// Tag-based note linking
+			if (shouldScanTagLinks && cardTags.length > 0) {
+				const noteTags = extractAnkiTagsFromNote(cache);
+				let matchedTag: string | null = null;
+				for (const noteTag of noteTags) {
+					for (const cardTag of cardTags) {
+						if (isTagMatch(cardTag, noteTag)) {
+							matchedTag = noteTag;
+							break;
+						}
+					}
+					if (matchedTag) break;
+				}
+
+				if (matchedTag) {
+					tagLinks.push({ file, matchedTag });
 					seenPaths.add(file.path);
 					continue;
 				}
@@ -3345,26 +3435,35 @@ card: ${card.cardId}
 			}
 		}
 
-		const result = { explicit, backlinks };
+		const result: CardLinkedNotes<TFile> = { explicit, backlinks, tagLinks };
 		this.linkedNotesCache.set(cardId, result);
 		return result;
 	}
 
-	public async scanVaultForCard(cardId: number): Promise<{ explicit: TFile[]; backlinks: TFile[] }> {
-		if (!this.app) return { explicit: [], backlinks: [] };
+	public async scanVaultForCard(cardId: number): Promise<CardLinkedNotes<TFile>> {
+		if (!this.app) return { explicit: [], backlinks: [], tagLinks: [] };
 
 		const shouldScanBacklinks = (this.config.backlinks ?? this.settings.enableBacklinks) && (this.config.links ?? this.settings.enableCardLinks);
-		if (!shouldScanBacklinks) {
+		const shouldScanTagLinks = (this.config.tagLinks ?? this.settings.enableTagLinks) && (this.config.links ?? this.settings.enableCardLinks);
+		if (!shouldScanBacklinks && !shouldScanTagLinks) {
 			return this.findLinkedNotes(cardId, true);
+		}
+
+		const card = this.cards.find((c) => c.cardId === cardId);
+		let cardTags: string[] = [];
+		if (shouldScanTagLinks) {
+			cardTags = await this.ensureCardTagsLoaded(cardId, card);
 		}
 
 		// Start with existing cached or fast frontmatter check
 		const initial = this.findLinkedNotes(cardId, true);
 		const explicit: TFile[] = [...initial.explicit];
 		const backlinks: TFile[] = [...initial.backlinks];
+		const tagLinks: CardTagLink<TFile>[] = [...initial.tagLinks];
 		const seenPaths = new Set<string>([
 			...explicit.map((f) => f.path),
 			...backlinks.map((f) => f.path),
+			...tagLinks.map((t) => t.file.path),
 		]);
 
 		const cardIdStr = String(cardId);
@@ -3384,10 +3483,51 @@ card: ${card.cardId}
 				}
 			}
 
-			// Read note body to discover backlinks (URI scheme, markdown codeblocks, cid references)
+			// Check tags from cache
+			if (shouldScanTagLinks && cardTags.length > 0 && cache) {
+				const noteTags = extractAnkiTagsFromNote(cache);
+				let matchedTag: string | null = null;
+				for (const noteTag of noteTags) {
+					for (const cardTag of cardTags) {
+						if (isTagMatch(cardTag, noteTag)) {
+							matchedTag = noteTag;
+							break;
+						}
+					}
+					if (matchedTag) break;
+				}
+				if (matchedTag) {
+					tagLinks.push({ file, matchedTag });
+					seenPaths.add(file.path);
+					continue;
+				}
+			}
+
+			// Read note body to discover backlinks (URI scheme, markdown codeblocks, cid references) or inline tags
 			try {
 				const content = await this.app.vault.cachedRead(file);
-				if (content.includes(cardIdStr)) {
+
+				// Check tag matches in content
+				if (shouldScanTagLinks && cardTags.length > 0 && (content.includes('anki-tag') || content.includes('#anki'))) {
+					const textTags = extractAnkiTagsFromText(content);
+					let matchedTag: string | null = null;
+					for (const noteTag of textTags) {
+						for (const cardTag of cardTags) {
+							if (isTagMatch(cardTag, noteTag)) {
+								matchedTag = noteTag;
+								break;
+							}
+						}
+						if (matchedTag) break;
+					}
+					if (matchedTag) {
+						tagLinks.push({ file, matchedTag });
+						seenPaths.add(file.path);
+						continue;
+					}
+				}
+
+				if (shouldScanBacklinks && content.includes(cardIdStr)) {
 					const isTargetMatch =
 						content.includes(`cardId=${cardIdStr}`) ||
 						content.includes(`card=${cardIdStr}`) ||
@@ -3406,7 +3546,7 @@ card: ${card.cardId}
 			}
 		}
 
-		const result = { explicit, backlinks };
+		const result: CardLinkedNotes<TFile> = { explicit, backlinks, tagLinks };
 		this.linkedNotesCache.set(cardId, result);
 		return result;
 	}
@@ -3428,6 +3568,40 @@ card: ${card.cardId}
 
 		new Notice(`Linked "${file.basename}" to Anki card`);
 		this.updateLinksButton();
+	}
+
+	public async linkTagToNote(file: TFile, tag: string, cardId?: number): Promise<void> {
+		if (!this.app) return;
+		try {
+			await this.app.fileManager.processFrontMatter(file, (fmData: Record<string, unknown>) => {
+				const existing = fmData['anki-tags'] ?? fmData['anki-tag'] ?? fmData['anki_tags'] ?? fmData['anki_tag'];
+				if (Array.isArray(existing)) {
+					if (!existing.includes(tag)) {
+						existing.push(tag);
+						fmData['anki-tags'] = existing;
+					}
+				} else if (typeof existing === 'string') {
+					if (existing !== tag) {
+						fmData['anki-tags'] = [existing, tag];
+						delete fmData['anki-tag'];
+						delete fmData['anki_tag'];
+					}
+				} else {
+					fmData['anki-tag'] = tag;
+				}
+			});
+			new Notice(`Linked Anki tag "${tag}" to "${file.basename}"`);
+			if (cardId !== undefined) {
+				this.linkedNotesCache.delete(cardId);
+				this.updateLinksButton();
+			} else {
+				this.linkedNotesCache.clear();
+				this.updateLinksButton();
+			}
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to link tag: ${msg}`);
+		}
 	}
 
 	public async unlinkNoteFromCard(file: TFile, cardId: number): Promise<void> {
@@ -3502,14 +3676,18 @@ card: ${card.cardId}
 		const cardId = card.cardId;
 		const cached = this.linkedNotesCache.get(cardId);
 
-		const applyCount = (total: number, explicitCount: number, backlinkCount: number) => {
+		const applyCount = (total: number, explicitCount: number, backlinkCount: number, tagLinkCount: number) => {
 			btn.empty();
 			if (total > 0) {
 				btn.removeClass('is-empty');
 				btn.addClass('is-linked');
 				btn.createSpan({ text: '🔗' });
 				btn.createSpan({ text: String(total) });
-				btn.setAttribute('title', `${explicitCount} linked note(s), ${backlinkCount} backlink(s) (click to view)`);
+				const parts: string[] = [];
+				if (explicitCount > 0) parts.push(`${explicitCount} linked`);
+				if (tagLinkCount > 0) parts.push(`${tagLinkCount} tagged`);
+				if (backlinkCount > 0) parts.push(`${backlinkCount} backlink(s)`);
+				btn.setAttribute('title', `${parts.join(', ')} (click to view)`);
 			} else {
 				btn.removeClass('is-linked');
 				btn.addClass('is-empty');
@@ -3520,22 +3698,24 @@ card: ${card.cardId}
 		};
 
 		if (cached) {
-			const total = cached.explicit.length + cached.backlinks.length;
-			applyCount(total, cached.explicit.length, cached.backlinks.length);
+			const total = cached.explicit.length + cached.backlinks.length + cached.tagLinks.length;
+			applyCount(total, cached.explicit.length, cached.backlinks.length, cached.tagLinks.length);
 		} else {
-			// Fast path: instant frontmatter + settings.cardLinks (0ms)
+			// Fast path: instant frontmatter + settings.cardLinks + fast metadata tags (0ms)
 			const fast = this.findLinkedNotes(cardId, true);
-			const quickTotal = fast.explicit.length + fast.backlinks.length;
-			applyCount(quickTotal, fast.explicit.length, fast.backlinks.length);
+			const quickTotal = fast.explicit.length + fast.backlinks.length + fast.tagLinks.length;
+			applyCount(quickTotal, fast.explicit.length, fast.backlinks.length, fast.tagLinks.length);
 
-			// Defer vault-wide backlink scan so it NEVER delays card switching
+			// Background ensure card tags loaded if not yet present + vault scan
 			window.setTimeout(() => {
 				if (!this.container.isConnected) return;
-				void this.scanVaultForCard(cardId).then((res) => {
-					const newTotal = res.explicit.length + res.backlinks.length;
-					if (newTotal !== quickTotal) {
-						this.updateLinksButton();
-					}
+				void this.ensureCardTagsLoaded(cardId, card).then(() => {
+					void this.scanVaultForCard(cardId).then((res) => {
+						const newTotal = res.explicit.length + res.backlinks.length + res.tagLinks.length;
+						if (newTotal !== quickTotal) {
+							this.updateLinksButton();
+						}
+					});
 				});
 			}, 40);
 		}
@@ -3543,7 +3723,10 @@ card: ${card.cardId}
 		btn.onclick = (evt: MouseEvent) => {
 			evt.preventDefault();
 			evt.stopPropagation();
-			this.openCardLinksDropdown(btn, card);
+			const activeCard = this.cards[this.currentIndex] || card;
+			if (activeCard) {
+				this.openCardLinksDropdown(btn, activeCard);
+			}
 		};
 
 		return btn;
@@ -3554,8 +3737,17 @@ card: ${card.cardId}
 		const currentCard = this.cards[this.currentIndex];
 		if (!btn || !currentCard) return;
 
-		const { explicit, backlinks } = this.findLinkedNotes(currentCard.cardId);
-		const total = explicit.length + backlinks.length;
+		const { explicit, backlinks, tagLinks } = this.findLinkedNotes(currentCard.cardId);
+		const total = explicit.length + backlinks.length + tagLinks.length;
+
+		btn.onclick = (evt: MouseEvent) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const activeCard = this.cards[this.currentIndex] || currentCard;
+			if (activeCard) {
+				this.openCardLinksDropdown(btn, activeCard);
+			}
+		};
 
 		btn.empty();
 		if (total > 0) {
@@ -3563,7 +3755,11 @@ card: ${card.cardId}
 			btn.addClass('is-linked');
 			btn.createSpan({ text: '🔗' });
 			btn.createSpan({ text: String(total) });
-			btn.setAttribute('title', `${explicit.length} linked note(s), ${backlinks.length} backlink(s) (click to view)`);
+			const parts: string[] = [];
+			if (explicit.length > 0) parts.push(`${explicit.length} linked`);
+			if (tagLinks.length > 0) parts.push(`${tagLinks.length} tagged`);
+			if (backlinks.length > 0) parts.push(`${backlinks.length} backlink(s)`);
+			btn.setAttribute('title', `${parts.join(', ')} (click to view)`);
 		} else {
 			btn.removeClass('is-linked');
 			btn.addClass('is-empty');
@@ -3584,36 +3780,50 @@ card: ${card.cardId}
 		}
 	};
 
-	private openCardLinksDropdown(anchorBtn: HTMLElement, card: AnkiCardInfo): void {
+	private openCardLinksDropdown(anchorBtn: HTMLElement, card?: AnkiCardInfo): void {
 		if (this.activeLinksDropdown) {
 			this.closeActiveLinksDropdown();
 			return;
 		}
+
+		const activeCard = this.cards[this.currentIndex] || card;
+		if (!activeCard) return;
 
 		const dropdown = document.body.createDiv({ cls: 'anki-links-dropdown' });
 		this.activeLinksDropdown = dropdown;
 
 		const updateDropdownPosition = () => {
 			const rect = anchorBtn.getBoundingClientRect();
-			const dropdownWidth = 320;
+			const dropdownWidth = 340;
 			let left = rect.left;
 			if (left + dropdownWidth > window.innerWidth - 12) {
 				left = Math.max(12, window.innerWidth - dropdownWidth - 12);
 			}
 			let top = rect.bottom + 6;
-			if (top + 340 > window.innerHeight - 12) {
-				top = Math.max(12, rect.top - 346);
+			if (top + 380 > window.innerHeight - 12) {
+				top = Math.max(12, rect.top - 386);
 			}
 			dropdown.style.left = `${left}px`;
 			dropdown.style.top = `${top}px`;
 		};
 		updateDropdownPosition();
 
+		const openNote = (file: TFile) => {
+			this.closeActiveLinksDropdown();
+			const leaf = this.app?.workspace.getLeaf('tab') || this.app?.workspace.getLeaf();
+			if (leaf) {
+				void leaf.openFile(file).then(() => {
+					this.app?.workspace.setActiveLeaf(leaf, { focus: true });
+				});
+			}
+		};
+
 		const renderDropdownContent = () => {
 			dropdown.empty();
 
-			const { explicit, backlinks } = this.findLinkedNotes(card.cardId);
-			const total = explicit.length + backlinks.length;
+			const currentActive = this.cards[this.currentIndex] || activeCard;
+			const { explicit, backlinks, tagLinks } = this.findLinkedNotes(currentActive.cardId);
+			const total = explicit.length + backlinks.length + tagLinks.length;
 
 			// Header
 			const header = dropdown.createDiv({ cls: 'anki-links-dropdown-header' });
@@ -3634,16 +3844,52 @@ card: ${card.cardId}
 
 			const body = dropdown.createDiv({ cls: 'anki-links-dropdown-body' });
 
-			// 1. Explicitly linked notes section
-			const explicitHeader = body.createDiv({ cls: 'anki-links-section-header' });
-			explicitHeader.setText(`Linked Notes (${explicit.length})`);
+			// Show card's Anki tags if present (with 1-click copy or link to active note!)
+			const cardTags = this.getCardTagsSync(currentActive.cardId, currentActive);
+			if (cardTags.length > 0) {
+				const tagsContainer = body.createDiv({ cls: 'anki-links-card-tags' });
+				tagsContainer.createSpan({ cls: 'anki-links-card-tags-label', text: 'Card tags:' });
+				const tagsList = tagsContainer.createDiv({ cls: 'anki-links-card-tags-list' });
+				const activeNote = this.app?.workspace.getActiveFile();
+				for (const tag of cardTags) {
+					const pill = tagsList.createSpan({ cls: 'anki-links-card-tag-pill', text: tag });
+					if (activeNote) {
+						pill.setAttribute('title', `Click to link "${tag}" to active note "${activeNote.basename}"`);
+					} else {
+						pill.setAttribute('title', `Click to copy "anki-tag: ${tag}" for your note`);
+					}
+					pill.onclick = async (e) => {
+						e.stopPropagation();
+						const currentNote = this.app?.workspace.getActiveFile();
+						if (currentNote) {
+							await this.linkTagToNote(currentNote, tag, currentActive.cardId);
+							renderDropdownContent();
+						} else {
+							void navigator.clipboard.writeText(`anki-tag: ${tag}`).then(() => {
+								new Notice(`Copied "anki-tag: ${tag}" to clipboard`);
+							});
+						}
+					};
+				}
+			}
 
-			const explicitList = body.createDiv({ cls: 'anki-links-list' });
-			if (explicit.length === 0) {
-				explicitList.createDiv({ cls: 'anki-links-empty', text: 'No explicitly linked notes' });
-			} else {
+			// If no links at all
+			if (total === 0) {
+				const emptyBox = body.createDiv({ cls: 'anki-links-empty' });
+				emptyBox.setText('No linked notes or backlinks for this card yet.');
+			}
+
+			// 1. Explicitly linked notes section
+			if (explicit.length > 0) {
+				const explicitHeader = body.createDiv({ cls: 'anki-links-section-header' });
+				explicitHeader.setText(`Directly Linked Notes (${explicit.length})`);
+
+				const explicitList = body.createDiv({ cls: 'anki-links-list' });
 				for (const file of explicit) {
-					const row = explicitList.createDiv({ cls: 'anki-links-row' });
+					const row = explicitList.createDiv({
+						cls: 'anki-links-row',
+						attr: { title: `Click to open "${file.basename}"` },
+					});
 					const contentBox = row.createDiv({ cls: 'anki-links-row-content' });
 					contentBox.createSpan({ cls: 'anki-links-file-icon', text: '📄' });
 
@@ -3654,34 +3900,83 @@ card: ${card.cardId}
 						textBox.createSpan({ cls: 'anki-links-file-path', text: folder });
 					}
 
-					row.onclick = () => {
-						this.closeActiveLinksDropdown();
-						const leaf = this.app?.workspace.getLeaf('tab');
-						void leaf?.openFile(file);
+					const actionGroup = row.createDiv({ cls: 'anki-links-row-actions' });
+					const openBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn',
+						text: 'Open ↗',
+						attr: { title: `Open "${file.basename}"` },
+					});
+					openBtn.onclick = (e) => {
+						e.stopPropagation();
+						openNote(file);
 					};
 
-					const unlinkBtn = row.createEl('button', {
+					const unlinkBtn = actionGroup.createEl('button', {
 						cls: 'anki-links-unlink-btn',
 						text: '✕',
 						attr: { title: `Unlink "${file.basename}"` },
 					});
 					unlinkBtn.onclick = async (e) => {
 						e.stopPropagation();
-						await this.unlinkNoteFromCard(file, card.cardId);
+						await this.unlinkNoteFromCard(file, currentActive.cardId);
 						renderDropdownContent();
 					};
+
+					row.onclick = () => openNote(file);
 				}
 			}
 
-			// 2. Backlinks section
+			// 2. Tagged notes section
+			const shouldShowTagLinks = (this.config.tagLinks ?? this.settings.enableTagLinks) && (this.config.links ?? this.settings.enableCardLinks);
+			if (shouldShowTagLinks && tagLinks.length > 0) {
+				const tagHeader = body.createDiv({ cls: 'anki-links-section-header' });
+				tagHeader.setText(`Tagged Notes (${tagLinks.length})`);
+
+				const tagList = body.createDiv({ cls: 'anki-links-list' });
+				for (const item of tagLinks) {
+					const file = item.file;
+					const row = tagList.createDiv({
+						cls: 'anki-links-row is-tag-link',
+						attr: { title: `Click to open "${file.basename}" (matched tag: ${item.matchedTag})` },
+					});
+					const contentBox = row.createDiv({ cls: 'anki-links-row-content' });
+					contentBox.createSpan({ cls: 'anki-links-file-icon', text: '🏷️' });
+
+					const textBox = contentBox.createDiv({ cls: 'anki-links-text-block' });
+					textBox.createSpan({ cls: 'anki-links-file-title', text: file.basename });
+					const folder = file.parent ? file.parent.path : '';
+					if (folder && folder !== '/') {
+						textBox.createSpan({ cls: 'anki-links-file-path', text: folder });
+					}
+
+					const actionGroup = row.createDiv({ cls: 'anki-links-row-actions' });
+					actionGroup.createSpan({ cls: 'anki-links-tag-badge', text: `🏷️ ${item.matchedTag}` });
+					const openBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn',
+						text: 'Open ↗',
+						attr: { title: `Open "${file.basename}"` },
+					});
+					openBtn.onclick = (e) => {
+						e.stopPropagation();
+						openNote(file);
+					};
+
+					row.onclick = () => openNote(file);
+				}
+			}
+
+			// 3. Backlinks section
 			const shouldShowBacklinks = (this.config.backlinks ?? this.settings.enableBacklinks) && (this.config.links ?? this.settings.enableCardLinks);
 			if (shouldShowBacklinks && backlinks.length > 0) {
 				const backlinkHeader = body.createDiv({ cls: 'anki-links-section-header' });
-				backlinkHeader.setText(`Backlinks in vault (${backlinks.length})`);
+				backlinkHeader.setText(`Backlinks in Vault (${backlinks.length})`);
 
 				const backlinkList = body.createDiv({ cls: 'anki-links-list' });
 				for (const file of backlinks) {
-					const row = backlinkList.createDiv({ cls: 'anki-links-row is-backlink' });
+					const row = backlinkList.createDiv({
+						cls: 'anki-links-row is-backlink',
+						attr: { title: `Click to open "${file.basename}"` },
+					});
 					const contentBox = row.createDiv({ cls: 'anki-links-row-content' });
 					contentBox.createSpan({ cls: 'anki-links-file-icon', text: '🔗' });
 
@@ -3692,19 +3987,25 @@ card: ${card.cardId}
 						textBox.createSpan({ cls: 'anki-links-file-path', text: folder });
 					}
 
-					row.createSpan({ cls: 'anki-links-mention-badge', text: 'mention' });
-
-					row.onclick = () => {
-						this.closeActiveLinksDropdown();
-						const leaf = this.app?.workspace.getLeaf('tab');
-						void leaf?.openFile(file);
+					const actionGroup = row.createDiv({ cls: 'anki-links-row-actions' });
+					actionGroup.createSpan({ cls: 'anki-links-mention-badge', text: 'mention' });
+					const openBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn',
+						text: 'Open ↗',
+						attr: { title: `Open "${file.basename}"` },
+					});
+					openBtn.onclick = (e) => {
+						e.stopPropagation();
+						openNote(file);
 					};
+
+					row.onclick = () => openNote(file);
 				}
 			}
 
 			body.createDiv({ cls: 'anki-links-divider' });
 
-			// 3. Quick Actions
+			// 4. Quick Actions
 			const actions = body.createDiv({ cls: 'anki-links-actions' });
 
 			const activeFile = this.app?.workspace.getActiveFile();
@@ -3718,9 +4019,9 @@ card: ${card.cardId}
 				});
 				linkActiveBtn.onclick = async () => {
 					if (isAlreadyLinked) {
-						await this.unlinkNoteFromCard(activeFile, card.cardId);
+						await this.unlinkNoteFromCard(activeFile, currentActive.cardId);
 					} else {
-						await this.linkNoteToCard(activeFile, card.cardId);
+						await this.linkNoteToCard(activeFile, currentActive.cardId);
 					}
 					renderDropdownContent();
 				};
@@ -3733,8 +4034,33 @@ card: ${card.cardId}
 				this.closeActiveLinksDropdown();
 				if (this.app) {
 					new NoteSelectModal(this.app, (file) => {
-						void this.linkNoteToCard(file, card.cardId);
+						void this.linkNoteToCard(file, currentActive.cardId);
 					}).open();
+				}
+			};
+
+			const searchTagBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
+			searchTagBtn.createSpan({ cls: 'anki-links-action-icon', text: '🏷️' });
+			searchTagBtn.createSpan({ cls: 'anki-links-action-label', text: 'Search Anki tags to link note...' });
+			searchTagBtn.onclick = () => {
+				this.closeActiveLinksDropdown();
+				const cardTags = this.getCardTagsSync(currentActive.cardId, currentActive);
+				if (this.app) {
+					new TagSelectModal(
+						this.app,
+						this.client,
+						(tag: string) => {
+							const currentNote = this.app?.workspace.getActiveFile();
+							if (currentNote) {
+								void this.linkTagToNote(currentNote, tag, currentActive.cardId);
+							} else {
+								new NoteSelectModal(this.app!, (file) => {
+									void this.linkTagToNote(file, tag, currentActive.cardId);
+								}).open();
+							}
+						},
+						cardTags
+					).open();
 				}
 			};
 
@@ -3743,16 +4069,16 @@ card: ${card.cardId}
 			createBtn.createSpan({ cls: 'anki-links-action-label', text: 'Create note from card & link' });
 			createBtn.onclick = () => {
 				this.closeActiveLinksDropdown();
-				void this.createNoteFromCard(card);
+				void this.createNoteFromCard(currentActive);
 			};
 
 			const copyUriBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
 			copyUriBtn.createSpan({ cls: 'anki-links-action-icon', text: '📋' });
 			copyUriBtn.createSpan({ cls: 'anki-links-action-label', text: 'Copy link to card' });
 			copyUriBtn.onclick = () => {
-				const rawTitle = card.fields?.Front?.value || card.fields?.Text?.value || card.question || `Card ${card.cardId}`;
-				const plainTitle = this.generateCleanTitle(this.cleanHtmlToMarkdown(rawTitle), card.cardId);
-				const link = `[Anki: ${plainTitle}](obsidian://anki-card?cardId=${card.cardId})`;
+				const rawTitle = currentActive.fields?.Front?.value || currentActive.fields?.Text?.value || currentActive.question || `Card ${currentActive.cardId}`;
+				const plainTitle = this.generateCleanTitle(this.cleanHtmlToMarkdown(rawTitle), currentActive.cardId);
+				const link = `[Anki: ${plainTitle}](obsidian://anki-card?cardId=${currentActive.cardId})`;
 				void navigator.clipboard.writeText(link).then(() => {
 					new Notice('Copied card link to clipboard');
 				});
@@ -3763,7 +4089,7 @@ card: ${card.cardId}
 		renderDropdownContent();
 
 		// Trigger vault scan if not done yet to populate backlinks
-		void this.scanVaultForCard(card.cardId).then(() => {
+		void this.scanVaultForCard(activeCard.cardId).then(() => {
 			if (this.activeLinksDropdown === dropdown) {
 				renderDropdownContent();
 			}

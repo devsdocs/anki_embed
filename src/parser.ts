@@ -142,6 +142,10 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 				const valLower = val.toLowerCase();
 				config.backlinks = valLower === 'true' || valLower === '1' || valLower === 'yes';
 				hasKeyValue = true;
+			} else if (key === 'taglinks' || key === 'tag_links' || key === 'taglink' || key === 'tag_link') {
+				const valLower = val.toLowerCase();
+				config.tagLinks = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
 			}
 		}
 	}

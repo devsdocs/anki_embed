@@ -1,7 +1,17 @@
 import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
-import { extractAnswerHtml, formatCardHtml, isClozeCard, normalizeAnkiCss } from '../src/card-html';
+import {
+	extractAnkiTagsFromNote,
+	extractAnkiTagsFromText,
+	extractAnswerHtml,
+	formatCardHtml,
+	isClozeCard,
+	isTagMatch,
+	normalizeAnkiCss,
+	normalizeAnkiTag,
+	parseTagItem,
+} from '../src/card-html';
 import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 
 // 3e. Test parseDeckConfig - links and backlinks config
@@ -243,7 +253,7 @@ assert.strictEqual(resetConfig.select, true);
 assert.strictEqual(resetConfig.deck, undefined);
 assert.strictEqual(resetConfig.query, undefined);
 
-// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10, enableRatingFlash: true, ratingFlashDurationMs: 25, ratingFlashTransitionMs: 20, enableGamepad: true, enableCardLinks: true, enableBacklinks: true
+// 8. Test DEFAULT_SETTINGS includes useCardStyles: true, liveSync: false, excludeSuspended: true, cardOrder: 'reviews-first', showCardCounts: true, showHeatmap: true, enableCardTimer: false, timerWarningSeconds: 5, timerLimitSeconds: 10, enableRatingFlash: true, ratingFlashDurationMs: 25, ratingFlashTransitionMs: 20, enableGamepad: true, enableCardLinks: true, enableBacklinks: true, enableTagLinks: true
 assert.strictEqual(DEFAULT_SETTINGS.useCardStyles, true);
 assert.strictEqual(DEFAULT_SETTINGS.liveSync, false);
 assert.strictEqual(DEFAULT_SETTINGS.excludeSuspended, true);
@@ -263,6 +273,7 @@ assert.strictEqual(DEFAULT_SETTINGS.cardFontScale, 1.0);
 assert.deepStrictEqual(DEFAULT_SETTINGS.cardLinks, {});
 assert.strictEqual(DEFAULT_SETTINGS.enableCardLinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableBacklinks, true);
+assert.strictEqual(DEFAULT_SETTINGS.enableTagLinks, true);
 assert.strictEqual(DEFAULT_SETTINGS.enableGamepad, true);
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[0], 'flip_or_good');
 assert.strictEqual(DEFAULT_SETTINGS.gamepadMapping[4], 'undo');
@@ -275,6 +286,83 @@ assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['b'], 'bury');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['f'], 'flag');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['c'], 'create_card_note');
 assert.strictEqual(DEFAULT_SETTINGS.keyboardMapping['a'], 'append_card_note');
+
+// 9. Test Tag Linking Logic
+// 9a. normalizeAnkiTag
+assert.strictEqual(normalizeAnkiTag('#Cardio'), 'Cardio');
+assert.strictEqual(normalizeAnkiTag('#anki/Cardio'), 'Cardio');
+assert.strictEqual(normalizeAnkiTag('anki-tag/Cardio/Heart'), 'Cardio::Heart');
+assert.strictEqual(normalizeAnkiTag('AnKing_Step1::#FirstAid::03_Cardio'), 'AnKing_Step1::FirstAid::03_Cardio');
+
+// 9b. isTagMatch
+assert.strictEqual(isTagMatch('AnKing_Step1::#FirstAid::03_Cardio::01_Anatomy', 'Cardio'), true);
+assert.strictEqual(isTagMatch('AnKing_Step1::#FirstAid::03_Cardio::01_Anatomy', '03_Cardio'), true);
+assert.strictEqual(isTagMatch('AnKing_Step1::#FirstAid::03_Cardio::01_Anatomy', 'FirstAid::Cardio'), true);
+assert.strictEqual(isTagMatch('AnKing_Step1::#FirstAid::03_Cardio::01_Anatomy', 'anki/Cardio'), true);
+assert.strictEqual(isTagMatch('Cardio', 'Cardio'), true);
+assert.strictEqual(isTagMatch('Cardio::Heart', 'anki/Cardio/Heart'), true);
+assert.strictEqual(isTagMatch('Beta_Blockers', 'Beta Blockers'), true);
+assert.strictEqual(isTagMatch('AnKing_Step1::#FirstAid::03_Cardio', 'car'), false);
+assert.strictEqual(isTagMatch('Cardio', 'Renal'), false);
+
+// 9c. extractAnkiTagsFromNote
+const mockCache1 = {
+	frontmatter: { 'anki-tag': 'Cardio' },
+};
+assert.deepStrictEqual(extractAnkiTagsFromNote(mockCache1), ['Cardio']);
+
+const mockCache2 = {
+	frontmatter: {
+		'anki-tags': ['Cardio', 'FirstAid::Pharm'],
+		tags: ['anki/BetaBlockers', 'other-tag'],
+	},
+	tags: [{ tag: '#anki/Arrhythmia' }],
+};
+const extracted2 = extractAnkiTagsFromNote(mockCache2);
+assert.strictEqual(extracted2.includes('Cardio'), true);
+assert.strictEqual(extracted2.includes('FirstAid::Pharm'), true);
+assert.strictEqual(extracted2.includes('BetaBlockers'), true);
+assert.strictEqual(extracted2.includes('Arrhythmia'), true);
+assert.strictEqual(extracted2.includes('other-tag'), false);
+
+// 9d. extractAnkiTagsFromText
+const noteText = `---
+anki-tags: Cardio, Pathology
+---
+Some note content
+#anki/Anatomy
+`;
+const extractedText = extractAnkiTagsFromText(noteText);
+assert.strictEqual(extractedText.includes('Cardio'), true);
+assert.strictEqual(extractedText.includes('Pathology'), true);
+assert.strictEqual(extractedText.includes('Anatomy'), true);
+
+// 9e. parseDeckConfig tagLinks
+const configTagLinks = parseDeckConfig(`
+tagLinks: false
+`);
+assert.strictEqual(configTagLinks.tagLinks, false);
+
+const configTagLinksTrue = parseDeckConfig(`
+tag_links: true
+`);
+assert.strictEqual(configTagLinksTrue.tagLinks, true);
+
+// 9f. parseTagItem parent tags test
+const tagItem1 = parseTagItem('AnKing_Step1::#FirstAid::03_Cardio::01_Anatomy');
+assert.strictEqual(tagItem1.leafTag, '01_Anatomy');
+assert.strictEqual(tagItem1.parentPath, 'AnKing_Step1 › #FirstAid › 03_Cardio');
+assert.strictEqual(tagItem1.tagToInsert, 'AnKing_Step1::FirstAid::03_Cardio::01_Anatomy');
+
+const tagItem2 = parseTagItem('AnKing_Step1::#FirstAid::04_Endocrine::01_Anatomy');
+assert.strictEqual(tagItem2.leafTag, '01_Anatomy');
+assert.strictEqual(tagItem2.parentPath, 'AnKing_Step1 › #FirstAid › 04_Endocrine');
+// The two items share the same leaf '01_Anatomy', but have completely different parent paths
+assert.notStrictEqual(tagItem1.parentPath, tagItem2.parentPath);
+
+const tagItemSingle = parseTagItem('Cardio');
+assert.strictEqual(tagItemSingle.leafTag, 'Cardio');
+assert.strictEqual(tagItemSingle.parentPath, '');
 
 console.log('✅ All verification tests passed successfully!');
 

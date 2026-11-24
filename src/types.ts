@@ -153,6 +153,7 @@ export interface AnkiEmbedSettings {
 	cardLinks: Record<string, string[]>;
 	enableCardLinks: boolean;
 	enableBacklinks: boolean;
+	enableTagLinks: boolean;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -185,6 +186,7 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	cardLinks: {},
 	enableCardLinks: true,
 	enableBacklinks: true,
+	enableTagLinks: true,
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -216,7 +218,19 @@ export interface DeckEmbedConfig {
 	fontSize?: number;
 	links?: boolean;
 	backlinks?: boolean;
+	tagLinks?: boolean;
 	[key: string]: unknown;
+}
+
+export interface CardTagLink<T = unknown> {
+	file: T;
+	matchedTag: string;
+}
+
+export interface CardLinkedNotes<T = unknown> {
+	explicit: T[];
+	backlinks: T[];
+	tagLinks: CardTagLink<T>[];
 }
 
 export interface AnkiCardField {
@@ -232,6 +246,7 @@ export interface AnkiCardInfo {
 	deckName: string;
 	modelName: string;
 	css?: string;
+	tags?: string[];
 	ord?: number;
 	due?: number;
 	interval?: number;
