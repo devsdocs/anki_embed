@@ -355,13 +355,13 @@ export class DeckPlayer {
 	}
 
 	private async updateCounts(deckName?: string): Promise<void> {
-		if (this.config.query || this.isLearningMode) {
+		if (!this.isLiveSync && (this.config.query || (this.isLearningMode && !this.config.deck))) {
 			this.currentCounts = this.calculateSessionCounts();
 			this.updateCountsDisplay();
 			return;
 		}
 
-		const targetDeck = this.config.deck || deckName;
+		const targetDeck = this.config.deck || deckName || this.cards[0]?.deckName;
 		if (targetDeck) {
 			try {
 				const statsRecord = await this.client.getDeckStats([targetDeck]);
