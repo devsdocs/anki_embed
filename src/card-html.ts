@@ -152,6 +152,8 @@ export function extractCardIdsFromText(content: string): number[] {
 export function normalizeAnkiTag(tag: string): string {
 	if (!tag) return '';
 	let clean = tag.trim();
+	// Remove all quotes (straight quotes, curly quotes, escaped quotes) and backslashes
+	clean = clean.replace(/["'\u201C\u201D\u2018\u2019\\]/g, '').trim();
 	// Remove leading #
 	clean = clean.replace(/^#+/, '');
 	// Remove anki/ or anki-tag/ prefix (case-insensitive)
@@ -163,6 +165,24 @@ export function normalizeAnkiTag(tag: string): string {
 	// Remove # in nested segments like ::#FirstAid -> ::FirstAid
 	clean = clean.replace(/::#+/g, '::');
 	return clean.trim();
+}
+
+export function buildAnkiTagQuery(rawTag: string): string {
+	const clean = normalizeAnkiTag(rawTag);
+	if (!clean) return '';
+
+	// Split by hierarchy delimiter (::) and clean any stray hashes or quotes from segments
+	const segments = clean
+		.split('::')
+		.map(s => s.trim().replace(/^#+/, '').replace(/\s+/g, '*').trim())
+		.filter(Boolean);
+
+	if (segments.length === 0) return '';
+
+	// Build a wildcard query that matches regardless of '#' on segments (e.g. #AK_Step1_v12 vs AK_Step1_v12)
+	// and matches all child/sub-tags under this branch (trailing *)
+	const pattern = segments.join('*');
+	return `tag:*${pattern}*`;
 }
 
 export interface AnkiTagItem {

@@ -157,7 +157,7 @@ export class DeckPlayer {
 	private onGamepadDisconnectedHandler: ((e: GamepadEvent) => void) | null = null;
 
 	private get isLiveSync(): boolean {
-		if (this.config.card !== undefined || this.config.cardId !== undefined) {
+		if (this.config.card !== undefined || this.config.cardId !== undefined || this.config.query !== undefined) {
 			return this.config.live === true;
 		}
 		return this.config.live ?? this.settings.liveSync;
@@ -452,7 +452,31 @@ export class DeckPlayer {
 				}
 			} else {
 				const query = this.buildQuery();
-				const cardIds = await this.client.findCards(query);
+				let cardIds = await this.client.findCards(query);
+
+				// Fallback 1: If 0 cards and query excluded suspended, retry without -is:suspended
+				if ((!cardIds || cardIds.length === 0) && query.includes('-is:suspended')) {
+					const queryWithoutSuspended = query.replace(/\s*-is:suspended\b/g, '').trim();
+					if (queryWithoutSuspended) {
+						const fallbackIds = await this.client.findCards(queryWithoutSuspended);
+						if (fallbackIds && fallbackIds.length > 0) {
+							cardIds = fallbackIds;
+						}
+					}
+				}
+
+				// Fallback 2: If 0 cards and query was a tag search (e.g. tag:"Heart"), try wildcard tag search (tag:*Heart*)
+				if (!cardIds || cardIds.length === 0) {
+					const tagMatch = query.match(/^tag:"?([^"*]+)"?/);
+					if (tagMatch?.[1]) {
+						const tagName = tagMatch[1];
+						const wildcardQuery = `tag:*${tagName}*`;
+						const fallbackIds = await this.client.findCards(wildcardQuery);
+						if (fallbackIds && fallbackIds.length > 0) {
+							cardIds = fallbackIds;
+						}
+					}
+				}
 
 				if (!cardIds || cardIds.length === 0) {
 					if (requestId !== this.loadRequestId) return;
@@ -1738,6 +1762,15 @@ export class DeckPlayer {
 		const body = this.container.createDiv({ cls: 'anki-embed-empty' });
 		body.createDiv({ text: '🎉 No cards found matching this query or deck.' });
 
+		if (this.config.query) {
+			const queryHint = body.createDiv({
+				cls: 'anki-embed-empty-query',
+				attr: { style: 'margin-top: 8px; font-size: 0.88em; opacity: 0.85;' },
+			});
+			queryHint.createSpan({ text: 'Searched query: ' });
+			queryHint.createEl('code', { text: this.config.query });
+		}
+
 		const actions = body.createDiv({ cls: 'anki-embed-actions' });
 		const refreshBtn = actions.createEl('button', {
 			cls: 'anki-embed-flip-btn',
@@ -1812,7 +1845,20 @@ export class DeckPlayer {
 		const header = this.container.createDiv({ cls: 'anki-embed-header' });
 
 		const titleContainer = header.createDiv({ cls: 'anki-embed-title' });
-		const title = titleText || this.config.deck || this.config.query || 'Anki Deck';
+		let title = titleText || this.config.deck;
+		if (!title && this.config.query) {
+			const tagMatch = this.config.query.match(/tag:(?:"\*?|\*?)(.*?)\*?"?$/);
+			if (tagMatch?.[1]) {
+				const parts = tagMatch[1].split('*').filter(Boolean);
+				const leaf = parts[parts.length - 1] ?? tagMatch[1];
+				title = `#${leaf.replace(/_/g, ' ')}`;
+			} else {
+				title = this.config.query;
+			}
+		}
+		if (!title) {
+			title = 'Anki Deck';
+		}
 		titleContainer.createSpan({ text: title });
 
 		const isGamepadConfigured = this.config.remote ?? this.settings.enableGamepad;
@@ -2025,6 +2071,31 @@ export class DeckPlayer {
 				};
 			}
 		}
+
+		const syncBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-icon anki-embed-btn-sync',
+			text: '☁️',
+			attr: { title: 'Sync with Anki' },
+		});
+		syncBtn.onclick = async () => {
+			const originalText = syncBtn.textContent;
+			syncBtn.textContent = '⏳';
+			syncBtn.disabled = true;
+			try {
+				await this.client.sync();
+				new Notice('Anki sync complete');
+				const activeDeck = this.config.deck || this.cards[0]?.deckName;
+				if (activeDeck) {
+					void this.updateCounts(activeDeck);
+				}
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`Anki sync failed: ${msg}`);
+			} finally {
+				syncBtn.textContent = originalText;
+				syncBtn.disabled = false;
+			}
+		};
 
 		const decksBtn = actions.createEl('button', {
 			cls: 'anki-embed-btn-icon anki-embed-btn-decks',
@@ -2453,6 +2524,9 @@ export class DeckPlayer {
 				this.updateFlagButton(card);
 				this.updateLinksButton();
 				this.restartCardTimerIfActive();
+				if (this.cardEl) {
+					this.cardEl.scrollTop = 0;
+				}
 			}
 
 			// Update card class (e.g. ord-based class)
@@ -2513,11 +2587,12 @@ export class DeckPlayer {
 	display: block;
 	width: 100%;
 	height: 100%;
-	min-height: 100%;
+	min-height: 0;
 	margin: 0 !important;
 	padding: 0 !important;
 	border-radius: var(--radius-s, 6px);
-	overflow: hidden;
+	overflow-x: auto;
+	overflow-y: auto;
 	box-sizing: border-box;
 	--anki-card-zoom: ${fontScale};
 }
@@ -2572,7 +2647,7 @@ ${normalizedCss}
 
 .card {
 	min-height: 100% !important;
-	height: 100% !important;
+	height: auto !important;
 	box-sizing: border-box !important;
 	margin: 0 !important;
 	margin-top: 0 !important;

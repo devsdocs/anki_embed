@@ -36,9 +36,11 @@ export class AnkiView extends ItemView {
 			return `Anki: ${this.config.deck}`;
 		}
 		if (this.config.query) {
-			const tagMatch = this.config.query.match(/^tag:"([^"*]+)\*?"$/);
+			const tagMatch = this.config.query.match(/tag:(?:"\*?|\*?)(.*?)\*?"?$/);
 			if (tagMatch?.[1]) {
-				return `Anki: #${tagMatch[1]}`;
+				const parts = tagMatch[1].split('*').filter(Boolean);
+				const leaf = parts[parts.length - 1] ?? tagMatch[1];
+				return `Anki: #${leaf.replace(/_/g, ' ')}`;
 			}
 			return `Anki: ${this.config.query}`;
 		}
@@ -94,7 +96,7 @@ export class AnkiView extends ItemView {
 				excludeSuspended: typeof s.excludeSuspended === 'boolean' ? s.excludeSuspended : undefined,
 				order: s.order,
 				counts: typeof s.counts === 'boolean' ? s.counts : undefined,
-				live: typeof s.live === 'boolean' ? s.live : (s.card !== undefined || s.cardId !== undefined ? false : undefined),
+				live: typeof s.live === 'boolean' ? s.live : (s.card !== undefined || s.cardId !== undefined || s.query !== undefined ? false : undefined),
 			};
 		}
 		await super.setState(state, result);
@@ -121,6 +123,10 @@ export class AnkiView extends ItemView {
 	}
 
 	private renderPlayer(): void {
+		if (this.player) {
+			this.player.destroy();
+			this.player = null;
+		}
 		this.contentEl.empty();
 		const playerContainer = this.contentEl.createDiv({ cls: 'anki-embed-container is-full-view' });
 		this.player = new DeckPlayer(

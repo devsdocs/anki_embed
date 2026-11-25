@@ -16,6 +16,7 @@ import {
 	matchesCardId,
 	normalizeAnkiCss,
 	normalizeAnkiTag,
+	buildAnkiTagQuery,
 	parseTagItem,
 	renderClozeDeletion,
 } from '../src/card-html';
@@ -477,6 +478,39 @@ void (async () => {
 	const modified3 = await syncNoteLinksWithSettings(mockApp, mockFile, testSettings);
 	assert.strictEqual(modified3, true);
 	assert.deepStrictEqual(testSettings.cardLinks['1003'], ['Notes/Cardio.md']);
+})();
+
+// 10. Scrollability verification tests
+(() => {
+	const fs = require('fs') as typeof import('fs');
+	const path = require('path') as typeof import('path');
+	const stylesCss = fs.readFileSync(path.join(__dirname, '../styles.css'), 'utf-8');
+	const deckPlayerTs = fs.readFileSync(path.join(__dirname, '../src/deck-player.ts'), 'utf-8');
+
+	// Verify that card elements allow vertical scrolling (overflow-y: auto)
+	assert.ok(stylesCss.includes('overflow-y: auto;'), 'styles.css must include overflow-y: auto for cards');
+	assert.ok(deckPlayerTs.includes('overflow-y: auto;'), 'deck-player.ts must include overflow-y: auto for :host');
+	assert.ok(!deckPlayerTs.includes(':host {\n\tdisplay: block;\n\twidth: 100%;\n\theight: 100%;\n\tmin-height: 100%;\n\tmargin: 0 !important;\n\tpadding: 0 !important;\n\tborder-radius: var(--radius-s, 6px);\n\toverflow: hidden;'), 'deck-player.ts must not have overflow: hidden on :host');
+	assert.ok(!stylesCss.includes('.anki-embed-card.anki-embed-card-custom {\n\tpadding: 0 !important;\n\tmargin: 0 !important;\n\tborder: none !important;\n\tborder-radius: var(--radius-s, 6px) !important;\n\tbackground-color: transparent;\n\twidth: 100%;\n\tflex: 1 1 auto;\n\tmin-height: 140px;\n\toverflow-x: auto;\n\toverflow-y: auto;\n\toverflow: hidden;'), 'styles.css must not have redundant overflow: hidden overwriting overflow-y: auto');
+})();
+
+// 11. buildAnkiTagQuery tests
+(() => {
+	assert.strictEqual(buildAnkiTagQuery('Heart'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('"Heart"'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery("'Heart'"), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('\"Heart\"'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('“Heart”'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('""Heart""'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('#Heart'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('#anki/Heart'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('anki-tags/Heart'), 'tag:*Heart*');
+	assert.strictEqual(buildAnkiTagQuery('AnKing::Step1::Cardio'), 'tag:*AnKing*Step1*Cardio*');
+	assert.strictEqual(buildAnkiTagQuery('AnKing/Step1/Cardio'), 'tag:*AnKing*Step1*Cardio*');
+	assert.strictEqual(buildAnkiTagQuery('AK_Step1_v12::SketchyPharm::01_Autonomic_Drugs::02_Sympathetic'), 'tag:*AK_Step1_v12*SketchyPharm*01_Autonomic_Drugs*02_Sympathetic*');
+	assert.strictEqual(buildAnkiTagQuery('heart failure'), 'tag:*heart*failure*');
+	assert.strictEqual(buildAnkiTagQuery('  "AnKing::Pathoma"  '), 'tag:*AnKing*Pathoma*');
+	assert.strictEqual(buildAnkiTagQuery(''), '');
 })();
 
 console.log('✅ All verification tests passed successfully!');

@@ -9,7 +9,7 @@ import { LinkedCardsManageModal } from './src/linked-cards-modal';
 import { AnkiImportModal } from './src/import-modal';
 import { AnkiRemoteConfigModal } from './src/remote-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
-import { normalizeAnkiTag } from './src/card-html';
+import { buildAnkiTagQuery } from './src/card-html';
 import {
 	getLinkedCardIdsForNote,
 	linkTagToNote,
@@ -347,8 +347,10 @@ export default class AnkiEmbedPlugin extends Plugin {
 			const target = evt.target as HTMLElement | null;
 			if (!target) return;
 
-			// Strictly only trigger when clicking directly on the pill content (the card ID text)
-			const pillContent = target.closest<HTMLElement>('.multi-select-pill-content');
+			// Strictly only trigger when clicking directly on the pill content (avoid remove button)
+			if (target.closest('.multi-select-pill-remove-button')) return;
+			const pill = target.closest<HTMLElement>('.multi-select-pill');
+			const pillContent = target.closest<HTMLElement>('.multi-select-pill-content') ?? pill?.querySelector<HTMLElement>('.multi-select-pill-content');
 			if (!pillContent) return;
 
 			// Ensure it is inside a card-linking property
@@ -367,11 +369,21 @@ export default class AnkiEmbedPlugin extends Plugin {
 				'anki-card-id',
 				'anki-card',
 			];
-			const tagKeys = ['anki-tags', 'anki-tag', 'anki_tags', 'anki_tag'];
-
+			const tagKeys = [
+				'anki-tags',
+				'anki-tag',
+				'anki_tags',
+				'anki_tag',
+				'ankitags',
+				'ankitag',
+			];
 			if (!key) return;
 
-			if (cardKeys.includes(key)) {
+			const normKey = key.toLowerCase().trim();
+			const isTagKey = tagKeys.includes(normKey);
+			const isNativeTagKey = normKey === 'tags' || normKey === 'tag';
+
+			if (cardKeys.includes(normKey)) {
 				const match = pillContent.textContent?.match(/\b(\d{8,})\b/);
 				if (match?.[1]) {
 					const cardId = Number.parseInt(match[1], 10);
@@ -381,13 +393,17 @@ export default class AnkiEmbedPlugin extends Plugin {
 						void this.activateView({ card: cardId, cardId, query: `cid:${cardId}`, select: false, live: false });
 					}
 				}
-			} else if (tagKeys.includes(key)) {
-				const rawTag = pillContent.textContent?.trim() ?? '';
-				const cleanTag = normalizeAnkiTag(rawTag);
-				if (cleanTag) {
+			} else if (isTagKey || isNativeTagKey) {
+				const inputEl = pillContent.querySelector<HTMLInputElement>('input');
+				const rawTag = (inputEl ? inputEl.value : pillContent.textContent)?.trim() ?? '';
+				if (isNativeTagKey && !/^(?:#?\s*anki[-_/::])/i.test(rawTag)) {
+					return;
+				}
+				const query = buildAnkiTagQuery(rawTag);
+				if (query) {
 					evt.preventDefault();
 					evt.stopPropagation();
-					void this.activateView({ query: `tag:"${cleanTag}*"`, select: false, live: false });
+					void this.activateView({ query, select: false, live: false, excludeSuspended: false });
 				}
 			}
 		});
@@ -463,7 +479,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 	}
 
 	async activateView(config?: DeckEmbedConfig, newTab: boolean = true): Promise<AnkiView> {
-		if (config && (config.card !== undefined || config.cardId !== undefined) && config.live === undefined) {
+		if (config && (config.card !== undefined || config.cardId !== undefined || config.query !== undefined) && config.live === undefined) {
 			config.live = false;
 		}
 		let leaf: WorkspaceLeaf | null = null;
