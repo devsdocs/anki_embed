@@ -11,6 +11,7 @@ import {
 	findMatchingAnkiTag,
 	formatCardHtml,
 	formatClozeTitle,
+	getCardStatusPill,
 	isClozeCard,
 	isTagMatch,
 	matchesCardId,
@@ -19,9 +20,10 @@ import {
 	buildAnkiTagQuery,
 	parseTagItem,
 	renderClozeDeletion,
+	sortCardsForLearningMode,
 } from '../src/card-html';
-import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
-import { syncNoteLinksWithSettings } from '../src/link-service';
+import { AnkiCardInfo, DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
+import { linkTagToNote, syncNoteLinksWithSettings } from '../src/link-service';
 
 // 3e. Test parseDeckConfig - links and backlinks config
 const configLinks = parseDeckConfig(`
@@ -511,6 +513,111 @@ void (async () => {
 	assert.strictEqual(buildAnkiTagQuery('heart failure'), 'tag:*heart*failure*');
 	assert.strictEqual(buildAnkiTagQuery('  "AnKing::Pathoma"  '), 'tag:*AnKing*Pathoma*');
 	assert.strictEqual(buildAnkiTagQuery(''), '');
+})();
+
+// 12. linkTagToNote frontmatter plural property & migration tests
+void (async () => {
+	const mockFile = { path: 'Notes/Heart.md', basename: 'Heart' } as unknown as import('obsidian').TFile;
+
+	// Case 1: Fresh note without any anki-tag property
+	let fm1: Record<string, unknown> = {};
+	const app1 = {
+		fileManager: {
+			processFrontMatter: async (_file: unknown, fn: (data: Record<string, unknown>) => void) => {
+				fn(fm1);
+			},
+		},
+	} as unknown as import('obsidian').App;
+	await linkTagToNote(app1, mockFile, 'Cardio');
+	assert.deepStrictEqual(fm1['anki-tags'], ['Cardio'], 'Must set anki-tags array');
+	assert.strictEqual(fm1['anki-tag'], undefined, 'Must not set singular anki-tag');
+
+	// Case 2: Existing singular anki-tag property is migrated to plural anki-tags
+	let fm2: Record<string, unknown> = { 'anki-tag': 'Cardio' };
+	const app2 = {
+		fileManager: {
+			processFrontMatter: async (_file: unknown, fn: (data: Record<string, unknown>) => void) => {
+				fn(fm2);
+			},
+		},
+	} as unknown as import('obsidian').App;
+	await linkTagToNote(app2, mockFile, 'Pathology');
+	assert.deepStrictEqual(fm2['anki-tags'], ['Cardio', 'Pathology']);
+	assert.strictEqual(fm2['anki-tag'], undefined, 'Must delete legacy anki-tag key');
+
+	// Case 3: Existing singular anki-tag with identical tag being re-linked
+	let fm3: Record<string, unknown> = { 'anki-tag': 'Cardio' };
+	const app3 = {
+		fileManager: {
+			processFrontMatter: async (_file: unknown, fn: (data: Record<string, unknown>) => void) => {
+				fn(fm3);
+			},
+		},
+	} as unknown as import('obsidian').App;
+	await linkTagToNote(app3, mockFile, 'Cardio');
+	assert.deepStrictEqual(fm3['anki-tags'], ['Cardio']);
+	assert.strictEqual(fm3['anki-tag'], undefined);
+
+	// Case 4: No duplicate tags added to existing anki-tags array
+	let fm4: Record<string, unknown> = { 'anki-tags': ['Cardio', 'Pathology'] };
+	const app4 = {
+		fileManager: {
+			processFrontMatter: async (_file: unknown, fn: (data: Record<string, unknown>) => void) => {
+				fn(fm4);
+			},
+		},
+	} as unknown as import('obsidian').App;
+	await linkTagToNote(app4, mockFile, 'Cardio');
+	assert.deepStrictEqual(fm4['anki-tags'], ['Cardio', 'Pathology']);
+})();
+
+// 13. Learning mode parsing and sortCardsForLearningMode tests
+(() => {
+	const parsed1 = parseDeckConfig(`
+deck: Test
+learning: true
+learning_order: due-future-new
+`);
+	assert.strictEqual(parsed1.learning, true);
+	assert.strictEqual(parsed1.learningOrder, 'due-future-new');
+
+	const parsed2 = parseDeckConfig(`
+deck: Test
+learn: yes
+learning_order: due-new-future
+`);
+	assert.strictEqual(parsed2.learning, true);
+	assert.strictEqual(parsed2.learningOrder, 'due-new-future');
+
+	assert.strictEqual(DEFAULT_SETTINGS.enableLearningMode, true);
+	assert.strictEqual(DEFAULT_SETTINGS.learningOrder, 'due-new-future');
+
+	const c1 = { cardId: 1, queue: 1, due: 100 } as AnkiCardInfo;
+	const c2 = { cardId: 2, queue: 1, due: 50 } as AnkiCardInfo;
+	const c3 = { cardId: 3, queue: 2, due: 200 } as AnkiCardInfo;
+	const c4 = { cardId: 4, queue: 0, due: 1 } as AnkiCardInfo;
+	const c5 = { cardId: 5, queue: 0, due: 2 } as AnkiCardInfo;
+	const c6 = { cardId: 6, queue: 2, due: 500 } as AnkiCardInfo;
+	const c7 = { cardId: 7, queue: 2, due: 400 } as AnkiCardInfo;
+
+	const cards = [c6, c4, c1, c3, c7, c5, c2];
+	const dueIds = new Set([3]);
+
+	// Order: due-new-future
+	// (learning: 2, 1; due review: 3; new: 4, 5; future review: 7, 6)
+	const sortedNewFirst = sortCardsForLearningMode(cards, dueIds, 'due-new-future');
+	assert.deepStrictEqual(sortedNewFirst.map(c => c.cardId), [2, 1, 3, 4, 5, 7, 6]);
+
+	// Order: due-future-new
+	// (learning: 2, 1; due review: 3; future review: 7, 6; new: 4, 5)
+	const sortedFutureFirst = sortCardsForLearningMode(cards, dueIds, 'due-future-new');
+	assert.deepStrictEqual(sortedFutureFirst.map(c => c.cardId), [2, 1, 3, 7, 6, 4, 5]);
+
+	// Status pill tests
+	assert.strictEqual(getCardStatusPill(c1, dueIds).label, 'Learning');
+	assert.strictEqual(getCardStatusPill(c3, dueIds).label, 'Due');
+	assert.strictEqual(getCardStatusPill(c4, dueIds).label, 'New');
+	assert.strictEqual(getCardStatusPill(c6, dueIds).label, 'Early');
 })();
 
 console.log('✅ All verification tests passed successfully!');

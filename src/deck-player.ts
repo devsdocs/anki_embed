@@ -9,9 +9,11 @@ import {
 	findMatchingAnkiTag,
 	formatCardHtml,
 	formatClozeTitle,
+	getCardStatusPill,
 	isClozeCard,
 	normalizeAnkiCss,
 	normalizeAnkiTag,
+	sortCardsForLearningMode,
 } from './card-html';
 import {
 	linkCardToNote,
@@ -29,6 +31,7 @@ import {
 	DEFAULT_GAMEPAD_MAPPING,
 	DEFAULT_KEYBOARD_MAPPING,
 	DeckEmbedConfig,
+	LearningOrder,
 	RemoteAction,
 } from './types';
 
@@ -138,7 +141,9 @@ export class DeckPlayer {
 	private cardStartTime: number = 0;
 	private liveSyncTimer: number | null = null;
 	private onWindowFocusHandler: (() => void) | null = null;
-	private currentCounts: { new: number; learn: number; review: number } | null = null;
+	private currentCounts: { new: number; learn: number; review: number; early?: number } | null = null;
+	private dueCardIds: Set<number> = new Set<number>();
+	private hasAcknowledgedEarlyReviews: boolean = false;
 	private cardTimerInterval: number | null = null;
 	private timeStreak: number = 0;
 	private timerExceededForCurrentCard: boolean = false;
@@ -155,6 +160,17 @@ export class DeckPlayer {
 	private connectedGamepadName: string | null = null;
 	private onGamepadConnectedHandler: ((e: GamepadEvent) => void) | null = null;
 	private onGamepadDisconnectedHandler: ((e: GamepadEvent) => void) | null = null;
+
+	public get isLearningMode(): boolean {
+		if (this.config.learning !== undefined) {
+			return this.config.learning;
+		}
+		return this.settings.enableLearningMode ?? true;
+	}
+
+	public set isLearningMode(val: boolean) {
+		this.config.learning = val;
+	}
 
 	private get isLiveSync(): boolean {
 		if (this.config.card !== undefined || this.config.cardId !== undefined || this.config.query !== undefined) {
@@ -313,29 +329,38 @@ export class DeckPlayer {
 		return parts.length > 0 ? parts.join(' ') : (shouldExcludeSuspended ? '-is:suspended' : 'is:due');
 	}
 
-	private calculateSessionCounts(): { new: number; learn: number; review: number } {
+	private calculateSessionCounts(): { new: number; learn: number; review: number; early?: number } {
 		let newCount = 0;
 		let learnCount = 0;
 		let reviewCount = 0;
+		let earlyCount = 0;
 
 		for (let i = this.currentIndex; i < this.cards.length; i++) {
 			const c = this.cards[i];
 			if (!c) continue;
-			const isLearn = c.queue === 1 || c.queue === 3 || c.type === 1 || c.type === 3;
-			const isReview = c.queue === 2 || c.type === 2 || (c.reviews ?? c.reps ?? 0) > 0;
-			if (isLearn) {
+			if (c.queue === 1 || c.queue === 3) {
 				learnCount++;
-			} else if (isReview) {
+			} else if (this.dueCardIds.has(c.cardId)) {
 				reviewCount++;
-			} else {
+			} else if (c.queue === 0 || c.type === 0) {
 				newCount++;
+			} else if (c.queue === 2 || c.type === 2) {
+				earlyCount++;
+			} else {
+				reviewCount++;
 			}
 		}
 
-		return { new: newCount, learn: learnCount, review: reviewCount };
+		return { new: newCount, learn: learnCount, review: reviewCount, early: earlyCount };
 	}
 
 	private async updateCounts(deckName?: string): Promise<void> {
+		if (this.config.query || this.isLearningMode) {
+			this.currentCounts = this.calculateSessionCounts();
+			this.updateCountsDisplay();
+			return;
+		}
+
 		const targetDeck = this.config.deck || deckName;
 		if (targetDeck) {
 			try {
@@ -359,6 +384,14 @@ export class DeckPlayer {
 		}
 		this.currentCounts = this.calculateSessionCounts();
 		this.updateCountsDisplay();
+	}
+
+	public sortCardsForLearningMode(cards: AnkiCardInfo[], dueCardIds: Set<number>, order: LearningOrder): AnkiCardInfo[] {
+		return sortCardsForLearningMode(cards, dueCardIds, order);
+	}
+
+	private getCardStatusPill(card: AnkiCardInfo): { label: string; cls: string; title: string } {
+		return getCardStatusPill(card, this.dueCardIds);
 	}
 
 	private sortReviewsFirst(cards: AnkiCardInfo[], randomize: boolean = false): AnkiCardInfo[] {
@@ -509,13 +542,32 @@ export class DeckPlayer {
 			if (requestId !== this.loadRequestId) return;
 
 			let finalCards = cards;
-			if (orderMode === 'reviews-first') {
+			if (this.isLearningMode && !this.isLiveSync) {
+				let dueCardIds = new Set<number>();
+				try {
+					const baseQuery = this.config.query
+						? this.config.query
+						: (this.config.deck ? `deck:"${this.config.deck}"` : '');
+					const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
+					const dueQuery = [baseQuery, 'is:due', suspendedClause].filter(Boolean).join(' ');
+					const dueIds = await this.client.findCards(dueQuery);
+					if (dueIds && dueIds.length > 0) {
+						dueCardIds = new Set(dueIds);
+					}
+				} catch {
+					// Fallback to empty
+				}
+				this.dueCardIds = dueCardIds;
+				const learningOrder = this.config.learningOrder ?? this.settings.learningOrder ?? 'due-new-future';
+				finalCards = this.sortCardsForLearningMode(cards, dueCardIds, learningOrder);
+			} else if (orderMode === 'reviews-first') {
 				finalCards = this.sortReviewsFirst(cards, shouldRandomize);
 			} else if (shouldRandomize) {
 				finalCards = [...cards].sort(() => Math.random() - 0.5);
 			}
 
 			this.cards = finalCards;
+			this.hasAcknowledgedEarlyReviews = false;
 			this.isLoading = false;
 
 			const activeDeck = this.config.deck || this.cards[0]?.deckName;
@@ -1900,9 +1952,56 @@ export class DeckPlayer {
 					void this.loadCards();
 				};
 			} else {
-				titleContainer.createSpan({
-					cls: 'anki-embed-badge',
+				const counterBadge = titleContainer.createSpan({
+					cls: 'anki-embed-badge is-clickable',
 					text: `${this.currentIndex + 1} / ${this.cards.length}`,
+					attr: { title: 'Offline mode (click to switch to live sync with Anki desktop)' },
+				});
+				counterBadge.onclick = () => {
+					this.config.live = true;
+					this.hasStarted = true;
+					void this.loadCards();
+				};
+
+				const modePill = titleContainer.createSpan({
+					cls: `anki-embed-badge anki-embed-mode-pill is-clickable ${this.isLearningMode ? 'is-learning' : 'is-browse'}`,
+					text: this.isLearningMode ? '🎯 Learn' : '📋 Browse',
+					attr: {
+						title: this.isLearningMode
+							? 'Mode: Learning (Anki steps & due priority). Click to switch to browse mode, right-click to change order'
+							: 'Mode: Browse (linear preview). Click to switch to learning mode',
+					},
+				});
+				modePill.onclick = (e) => {
+					e.stopPropagation();
+					this.isLearningMode = !this.isLearningMode;
+					new Notice(this.isLearningMode ? 'Switched to learning mode (Anki steps & due priority)' : 'Switched to browse mode (linear review)');
+					void this.loadCards();
+				};
+				modePill.addEventListener('contextmenu', (e: MouseEvent) => {
+					e.preventDefault();
+					e.stopPropagation();
+					const menu = new Menu();
+					const currentOrder = this.config.learningOrder ?? this.settings.learningOrder ?? 'due-new-future';
+					menu.addItem((item) => {
+						item.setTitle('Due > new > future reviews')
+							.setChecked(currentOrder === 'due-new-future')
+							.onClick(() => {
+								this.config.learningOrder = 'due-new-future';
+								new Notice('Learning order: Due > new > future reviews');
+								void this.loadCards();
+							});
+					});
+					menu.addItem((item) => {
+						item.setTitle('Due > future reviews > new')
+							.setChecked(currentOrder === 'due-future-new')
+							.onClick(() => {
+								this.config.learningOrder = 'due-future-new';
+								new Notice('Learning order: Due > future reviews > new');
+								void this.loadCards();
+							});
+					});
+					menu.showAtMouseEvent(e);
 				});
 			}
 
@@ -2350,8 +2449,17 @@ export class DeckPlayer {
 		}
 	}
 
-	private updateCountsDisplay(): void {
+	private updateCountsDisplay(card?: AnkiCardInfo): void {
 		if (!this.footerEl) return;
+		const currentCard = card ?? this.cards[this.currentIndex];
+		const statusPill = this.footerEl.querySelector<HTMLElement>('.anki-embed-status-pill');
+		if (statusPill && currentCard && !this.isLiveSync) {
+			const status = this.getCardStatusPill(currentCard);
+			statusPill.className = `anki-embed-status-pill ${status.cls}`;
+			statusPill.textContent = status.label;
+			statusPill.setAttribute('title', status.title);
+		}
+
 		const shouldShowCounts = this.config.counts ?? this.settings.showCardCounts;
 		if (!shouldShowCounts) return;
 		const counts = this.currentCounts ?? this.calculateSessionCounts();
@@ -2369,6 +2477,23 @@ export class DeckPlayer {
 		if (reviewEl) {
 			reviewEl.textContent = String(counts.review);
 			reviewEl.setAttribute('title', `${counts.review} review cards`);
+		}
+		let earlyEl = this.footerEl.querySelector<HTMLElement>('.anki-count-early');
+		if (counts.early && counts.early > 0) {
+			if (!earlyEl) {
+				const countsContainer = this.footerEl.querySelector('.anki-embed-counts');
+				if (countsContainer) {
+					countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+					earlyEl = countsContainer.createSpan({ cls: 'anki-count-early' });
+				}
+			}
+			if (earlyEl) {
+				earlyEl.textContent = String(counts.early);
+				earlyEl.setAttribute('title', `${counts.early} future review cards (early)`);
+			}
+		} else if (earlyEl) {
+			earlyEl.previousElementSibling?.remove();
+			earlyEl.remove();
 		}
 	}
 
@@ -2459,11 +2584,11 @@ export class DeckPlayer {
 					cls: `anki-embed-rate-btn ${opt.clsName}`,
 					attr: { 'data-ease': String(opt.ease) },
 				});
-				const labelText = (this.isLiveSync && card.nextReviews?.[i])
-					? `${opt.label} (${card.nextReviews[i]})`
-					: opt.label;
-				btn.createSpan({ text: labelText });
+				btn.createSpan({ text: opt.label });
 				btn.createSpan({ cls: 'anki-embed-rate-key', text: `[${opt.key}]` });
+				if (card.nextReviews?.[i]) {
+					btn.createSpan({ cls: 'anki-embed-rate-interval', text: card.nextReviews[i] });
+				}
 
 				btn.onclick = () => {
 					void this.rateCurrentCard(opt.ease);
@@ -2498,6 +2623,17 @@ export class DeckPlayer {
 			return;
 		}
 
+		if (this.isLearningMode && !this.isLiveSync && !this.hasAcknowledgedEarlyReviews && this.currentIndex > 0) {
+			const candidateCard = this.cards[this.currentIndex];
+			if (candidateCard && candidateCard.queue === 2 && !this.dueCardIds.has(candidateCard.cardId)) {
+				const remainingPending = this.cards.slice(this.currentIndex).filter(c => c.queue === 1 || c.queue === 3 || this.dueCardIds.has(c.cardId) || c.queue === 0);
+				if (remainingPending.length === 0) {
+					this.renderMilestoneScreen(this.cards.length - this.currentIndex);
+					return;
+				}
+			}
+		}
+
 		const card = this.cards[this.currentIndex];
 		if (!card) return;
 
@@ -2517,9 +2653,20 @@ export class DeckPlayer {
 		if (isLayoutMounted && this.currentModelName === (card.modelName ?? '') && this.currentFontScale === fontScale) {
 			// Update header in-place
 			if (!this.showingAnswer) {
-				const badgeEl = this.headerEl!.querySelector<HTMLElement>('.anki-embed-badge:not(.anki-embed-badge-live)');
+				const badgeEl = this.headerEl!.querySelector<HTMLElement>('.anki-embed-badge:not(.anki-embed-badge-live):not(.anki-embed-mode-pill)');
 				if (badgeEl) {
 					badgeEl.textContent = `${this.currentIndex + 1} / ${this.cards.length}`;
+				}
+				const modePill = this.headerEl!.querySelector<HTMLElement>('.anki-embed-mode-pill');
+				if (modePill && !this.isLiveSync) {
+					modePill.className = `anki-embed-badge anki-embed-mode-pill is-clickable ${this.isLearningMode ? 'is-learning' : 'is-browse'}`;
+					modePill.textContent = this.isLearningMode ? '🎯 Learn' : '📋 Browse';
+					modePill.setAttribute(
+						'title',
+						this.isLearningMode
+							? 'Mode: Learning (Anki steps & due priority). Click to switch to browse mode'
+							: 'Mode: Browse (linear preview). Click to switch to learning mode'
+					);
 				}
 				this.updateFlagButton(card);
 				this.updateLinksButton();
@@ -2542,7 +2689,7 @@ export class DeckPlayer {
 			if (controlsContainer) {
 				this.renderFooterControls(controlsContainer, card);
 			}
-			this.updateCountsDisplay();
+			this.updateCountsDisplay(card);
 
 			this.preparseNextCard();
 			return;
@@ -2695,9 +2842,22 @@ ${normalizedCss}
 		this.footerEl = footer;
 
 		const shouldShowCounts = this.config.counts ?? this.settings.showCardCounts;
+		const countsContainer = footer.createDiv({ cls: 'anki-embed-counts' });
+
+		if (!this.isLiveSync) {
+			const status = this.getCardStatusPill(card);
+			countsContainer.createSpan({
+				cls: `anki-embed-status-pill ${status.cls}`,
+				text: status.label,
+				attr: { title: status.title },
+			});
+			if (shouldShowCounts) {
+				countsContainer.createSpan({ cls: 'anki-count-sep', text: '•' });
+			}
+		}
+
 		if (shouldShowCounts) {
 			const counts = this.currentCounts ?? this.calculateSessionCounts();
-			const countsContainer = footer.createDiv({ cls: 'anki-embed-counts' });
 
 			const newEl = countsContainer.createSpan({ cls: 'anki-count-new', text: String(counts.new) });
 			newEl.setAttribute('title', `${counts.new} new cards`);
@@ -2711,6 +2871,12 @@ ${normalizedCss}
 
 			const reviewEl = countsContainer.createSpan({ cls: 'anki-count-review', text: String(counts.review) });
 			reviewEl.setAttribute('title', `${counts.review} review cards`);
+
+			if (counts.early && counts.early > 0) {
+				countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+				const earlyEl = countsContainer.createSpan({ cls: 'anki-count-early', text: String(counts.early) });
+				earlyEl.setAttribute('title', `${counts.early} future review cards (early)`);
+			}
 		}
 
 		const controlsContainer = footer.createDiv({ cls: 'anki-embed-footer-controls' });
@@ -2827,9 +2993,26 @@ ${normalizedCss}
 
 		if (card) {
 			const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;
-			void this.client.answerCard(card.cardId, ease, timeParam).catch((err) => {
-				console.warn('Failed to record card answer in Anki:', err);
-			});
+			if (this.isLearningMode && !this.isLiveSync) {
+				try {
+					await this.client.answerCard(card.cardId, ease, timeParam);
+					const updatedList = await this.client.getCardsInfo([card.cardId]);
+					const updated = updatedList[0];
+					if (updated && (updated.queue === 1 || updated.queue === 3)) {
+						// Re-insert into queue with automatic no-waiting buffer
+						const remaining = this.cards.length - (this.currentIndex + 1);
+						const offset = Math.min(3, remaining);
+						const insertIdx = this.currentIndex + 1 + offset;
+						this.cards.splice(insertIdx, 0, updated);
+					}
+				} catch (err: unknown) {
+					console.warn('Failed to record learning answer in Anki:', err);
+				}
+			} else {
+				void this.client.answerCard(card.cardId, ease, timeParam).catch((err) => {
+					console.warn('Failed to record card answer in Anki:', err);
+				});
+			}
 		}
 
 		this.currentIndex++;
@@ -3906,7 +4089,7 @@ ${tagsSection}`;
 					if (activeNote) {
 						pill.setAttribute('title', `Click to link "${tag}" to active note "${activeNote.basename}"`);
 					} else {
-						pill.setAttribute('title', `Click to copy "anki-tag: ${tag}" for your note`);
+						pill.setAttribute('title', `Click to copy "anki-tags: [${tag}]" for your note`);
 					}
 					pill.onclick = async (e) => {
 						e.stopPropagation();
@@ -3915,8 +4098,8 @@ ${tagsSection}`;
 							await this.linkTagToNote(currentNote, tag, currentActive.cardId);
 							renderDropdownContent();
 						} else {
-							void navigator.clipboard.writeText(`anki-tag: ${tag}`).then(() => {
-								new Notice(`Copied "anki-tag: ${tag}" to clipboard`);
+							void navigator.clipboard.writeText(`anki-tags: ["${tag}"]`).then(() => {
+								new Notice(`Copied "anki-tags: ["${tag}"]" to clipboard`);
 							});
 						}
 					};
@@ -4165,6 +4348,42 @@ ${tagsSection}`;
 		this.linksDropdownCleanup = () => {
 			document.removeEventListener('click', onDocClick);
 			document.removeEventListener('keydown', onKeyDown);
+		};
+	}
+
+	private renderMilestoneScreen(futureCount: number): void {
+		this.container.empty();
+		this.renderHeader(this.config.deck);
+
+		const completedDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
+		completedDiv.createDiv({
+			cls: 'anki-embed-completed-icon',
+			text: '🎉',
+		});
+		completedDiv.createEl('h3', { text: 'All due cards completed!' });
+		completedDiv.createEl('p', {
+			text: `You have completed all due learning, review, and new cards for this session. There are ${futureCount} future review card(s) remaining if you want to review ahead early.`,
+		});
+
+		const actions = completedDiv.createDiv({
+			cls: 'anki-embed-actions',
+			attr: { style: 'margin-top: 16px; justify-content: center; gap: 10px; flex-wrap: wrap;' },
+		});
+		const continueBtn = actions.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: `Continue early reviews (${futureCount} cards)`,
+		});
+		continueBtn.onclick = () => {
+			this.hasAcknowledgedEarlyReviews = true;
+			void this.renderCurrentCard();
+		};
+
+		const finishBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: 'Finish session',
+		});
+		finishBtn.onclick = () => {
+			this.renderCompleted();
 		};
 	}
 

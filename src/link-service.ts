@@ -278,19 +278,22 @@ export async function linkTagToNote(app: App | undefined, file: TFile, tag: stri
 	if (!app) return;
 	await app.fileManager.processFrontMatter(file, (fmData: Record<string, unknown>) => {
 		const existing = fmData['anki-tags'] ?? fmData['anki-tag'] ?? fmData['anki_tags'] ?? fmData['anki_tag'];
+
+		// Delete any legacy singular or alternative key names
+		delete fmData['anki-tag'];
+		delete fmData['anki_tag'];
+		delete fmData['anki_tags'];
+
+		let tagList: string[] = [];
 		if (Array.isArray(existing)) {
-			if (!existing.includes(tag)) {
-				existing.push(tag);
-				fmData['anki-tags'] = existing;
-			}
-		} else if (typeof existing === 'string') {
-			if (existing !== tag) {
-				fmData['anki-tags'] = [existing, tag];
-				delete fmData['anki-tag'];
-				delete fmData['anki_tag'];
-			}
-		} else {
-			fmData['anki-tag'] = tag;
+			tagList = existing.map(item => String(item).trim()).filter(Boolean);
+		} else if (typeof existing === 'string' && existing.trim()) {
+			tagList = [existing.trim()];
 		}
+
+		if (!tagList.includes(tag)) {
+			tagList.push(tag);
+		}
+		fmData['anki-tags'] = tagList;
 	});
 }

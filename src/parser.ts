@@ -80,6 +80,16 @@ export function parseDeckConfig(source: string): DeckEmbedConfig {
 				const valLower = val.toLowerCase();
 				config.counts = valLower === 'true' || valLower === '1' || valLower === 'yes';
 				hasKeyValue = true;
+			} else if (key === 'learning' || key === 'learning_mode' || key === 'learn' || key === 'learningmode') {
+				const valLower = val.toLowerCase();
+				config.learning = valLower === 'true' || valLower === '1' || valLower === 'yes';
+				hasKeyValue = true;
+			} else if (key === 'learning_order' || key === 'learningorder' || key === 'learn_order') {
+				const valLower = val.toLowerCase().replace(/[\s_]+/g, '-');
+				config.learningOrder = valLower.includes('future') && valLower.indexOf('future') < valLower.indexOf('new')
+					? 'due-future-new'
+					: 'due-new-future';
+				hasKeyValue = true;
 			} else if (key === 'heatmap' || key === 'showheatmap' || key === 'show_heatmap') {
 				const valLower = val.toLowerCase();
 				config.heatmap = valLower === 'true' || valLower === '1' || valLower === 'yes';

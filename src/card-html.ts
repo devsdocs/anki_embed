@@ -1,3 +1,5 @@
+import { AnkiCardInfo, LearningOrder } from './types';
+
 export function formatCardHtml(rawHtml: string, questionHtml?: string): string {
 	let result = rawHtml;
 	if (questionHtml) {
@@ -479,5 +481,64 @@ export function formatClozeTitle(
 
 	return clean;
 }
+
+export function sortCardsForLearningMode(cards: AnkiCardInfo[], dueCardIds: Set<number>, order: LearningOrder): AnkiCardInfo[] {
+	const learning: AnkiCardInfo[] = [];
+	const dueReviews: AnkiCardInfo[] = [];
+	const newCards: AnkiCardInfo[] = [];
+	const futureReviews: AnkiCardInfo[] = [];
+
+	for (const card of cards) {
+		if (card.queue === 1 || card.queue === 3) {
+			learning.push(card);
+		} else if (dueCardIds.has(card.cardId)) {
+			dueReviews.push(card);
+		} else if (card.queue === 0 || card.type === 0) {
+			newCards.push(card);
+		} else {
+			futureReviews.push(card);
+		}
+	}
+
+	learning.sort((a, b) => (a.due ?? 0) - (b.due ?? 0));
+	dueReviews.sort((a, b) => (a.due ?? 0) - (b.due ?? 0));
+	newCards.sort((a, b) => (a.due ?? 0) - (b.due ?? 0));
+	futureReviews.sort((a, b) => (a.due ?? 0) - (b.due ?? 0));
+
+	if (order === 'due-future-new') {
+		return [...learning, ...dueReviews, ...futureReviews, ...newCards];
+	}
+	return [...learning, ...dueReviews, ...newCards, ...futureReviews];
+}
+
+export function getCardStatusPill(card: AnkiCardInfo, dueCardIds: Set<number>): { label: string; cls: string; title: string } {
+	if (card.queue === 1 || card.queue === 3) {
+		return {
+			label: 'Learning',
+			cls: 'is-learning',
+			title: 'Learning/relearning card (active learning steps)',
+		};
+	}
+	if (dueCardIds.has(card.cardId)) {
+		return {
+			label: 'Due',
+			cls: 'is-due',
+			title: 'Due for review today or overdue',
+		};
+	}
+	if (card.queue === 0 || card.type === 0) {
+		return {
+			label: 'New',
+			cls: 'is-new',
+			title: 'New card (never reviewed yet)',
+		};
+	}
+	return {
+		label: 'Early',
+		cls: 'is-early',
+		title: 'Future review card (reviewing ahead early)',
+	};
+}
+
 
 

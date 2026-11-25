@@ -272,8 +272,8 @@ export default class AnkiEmbedPlugin extends Plugin {
 			name: 'Search and copy Anki tag',
 			callback: () => {
 				new TagSelectModal(this.app, this.client, (tag: string) => {
-					void navigator.clipboard.writeText(`anki-tag: ${tag}`).then(() => {
-						new Notice(`Copied "anki-tag: ${tag}" to clipboard`);
+					void navigator.clipboard.writeText(`anki-tags: ["${tag}"]`).then(() => {
+						new Notice(`Copied "anki-tags: ["${tag}"]" to clipboard`);
 					});
 				}).open();
 			},
@@ -625,6 +625,14 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.cardExportFolder = DEFAULT_SETTINGS.cardExportFolder;
 			repaired = true;
 		}
+		if (typeof this.settings.enableLearningMode !== 'boolean') {
+			this.settings.enableLearningMode = DEFAULT_SETTINGS.enableLearningMode;
+			repaired = true;
+		}
+		if (!['due-new-future', 'due-future-new'].includes(this.settings.learningOrder)) {
+			this.settings.learningOrder = DEFAULT_SETTINGS.learningOrder;
+			repaired = true;
+		}
 		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
 			this.settings.gamepadMapping = Object.assign({}, DEFAULT_GAMEPAD_MAPPING);
 			repaired = true;
@@ -721,6 +729,28 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 								'reviews-first': 'Reviews first (due reviews before new cards)',
 								random: 'Randomized mix',
 								default: 'Deck order',
+							},
+						},
+					},
+					{
+						name: 'Enable learning mode',
+						desc: 'Actively re-queue learning cards on rating and prioritize cards by Anki due status.',
+						control: {
+							type: 'toggle',
+							key: 'enableLearningMode',
+							defaultValue: DEFAULT_SETTINGS.enableLearningMode,
+						},
+					},
+					{
+						name: 'Learning mode card order',
+						desc: 'Choose whether new cards or future review cards are presented after due cards in learning mode.',
+						control: {
+							type: 'dropdown',
+							key: 'learningOrder',
+							defaultValue: DEFAULT_SETTINGS.learningOrder,
+							options: {
+								'due-new-future': 'Due > New > Future reviews (Default)',
+								'due-future-new': 'Due > Future reviews > New',
 							},
 						},
 					},

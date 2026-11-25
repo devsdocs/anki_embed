@@ -352,6 +352,92 @@
 	font-weight: normal;
 }
 
+.anki-embed-rate-interval {
+	display: block;
+	font-size: 0.76em;
+	line-height: 1.1;
+	opacity: 0.92;
+	font-weight: 600;
+	margin-top: 2px;
+	letter-spacing: 0.2px;
+}
+
+.anki-embed-status-pill {
+	display: inline-flex;
+	align-items: center;
+	font-size: 0.72em;
+	padding: 1px 7px;
+	border-radius: 12px;
+	font-weight: 600;
+	letter-spacing: 0.3px;
+	line-height: 1.4;
+	margin-left: 0;
+	margin-right: 4px;
+	vertical-align: middle;
+}
+
+.anki-embed-status-pill.is-learning {
+	background-color: rgba(229, 57, 53, 0.15);
+	color: #e53935;
+	border: 1px solid rgba(229, 57, 53, 0.3);
+}
+
+.anki-embed-status-pill.is-due {
+	background-color: rgba(251, 140, 0, 0.15);
+	color: #fb8c00;
+	border: 1px solid rgba(251, 140, 0, 0.3);
+}
+
+.anki-embed-status-pill.is-new {
+	background-color: rgba(30, 136, 229, 0.15);
+	color: #1e88e5;
+	border: 1px solid rgba(30, 136, 229, 0.3);
+}
+
+.anki-embed-status-pill.is-early {
+	background-color: rgba(156, 39, 176, 0.15);
+	color: #ab47bc;
+	border: 1px solid rgba(156, 39, 176, 0.3);
+}
+
+.anki-count-early {
+	color: #ab47bc;
+	font-weight: 600;
+}
+
+.anki-embed-badge.is-clickable {
+	cursor: pointer;
+	user-select: none;
+	transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.anki-embed-badge.is-clickable:hover {
+	opacity: 0.85;
+	background-color: var(--background-modifier-hover);
+}
+
+.anki-embed-mode-pill {
+	cursor: pointer;
+	user-select: none;
+	font-weight: 600;
+	letter-spacing: 0.2px;
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.anki-embed-mode-pill.is-learning {
+	background-color: rgba(var(--interactive-accent-rgb, 100, 100, 255), 0.18);
+	color: var(--interactive-accent);
+}
+
+.anki-embed-mode-pill.is-browse {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-muted);
+}
+
+.anki-embed-mode-pill:hover {
+	opacity: 0.88;
+}
+
 /* Completion & Empty States */
 .anki-embed-empty,
 .anki-embed-completed,

@@ -1,5 +1,6 @@
 export type AnkiCardFilter = 'all' | 'due' | 'new' | 'due+new';
 export type AnkiCardOrder = 'reviews-first' | 'random' | 'default';
+export type LearningOrder = 'due-new-future' | 'due-future-new';
 
 export type RemoteAction =
 	| 'flip_or_good'
@@ -156,6 +157,8 @@ export interface AnkiEmbedSettings {
 	enableTagLinks: boolean;
 	autoLinkExportedCard: boolean;
 	cardExportFolder: string;
+	enableLearningMode: boolean;
+	learningOrder: LearningOrder;
 }
 
 export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
@@ -191,6 +194,8 @@ export const DEFAULT_SETTINGS: AnkiEmbedSettings = {
 	enableTagLinks: true,
 	autoLinkExportedCard: true,
 	cardExportFolder: '',
+	enableLearningMode: true,
+	learningOrder: 'due-new-future',
 };
 
 export const VIEW_TYPE_ANKI_EMBED = 'anki-embed-view';
@@ -223,6 +228,8 @@ export interface DeckEmbedConfig {
 	links?: boolean;
 	backlinks?: boolean;
 	tagLinks?: boolean;
+	learning?: boolean;
+	learningOrder?: LearningOrder;
 	[key: string]: unknown;
 }
 
