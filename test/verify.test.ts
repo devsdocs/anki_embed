@@ -2,19 +2,25 @@ import assert from 'assert';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
 import {
+	checkFrontmatterForCardId,
 	extractAnkiTagsFromNote,
 	extractAnkiTagsFromText,
 	extractAnswerHtml,
+	extractCardIdsFromText,
+	extractLinkedCardIdsFromFrontmatter,
+	findMatchingAnkiTag,
 	formatCardHtml,
 	formatClozeTitle,
 	isClozeCard,
 	isTagMatch,
+	matchesCardId,
 	normalizeAnkiCss,
 	normalizeAnkiTag,
 	parseTagItem,
 	renderClozeDeletion,
 } from '../src/card-html';
 import { DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
+import { syncNoteLinksWithSettings } from '../src/link-service';
 
 // 3e. Test parseDeckConfig - links and backlinks config
 const configLinks = parseDeckConfig(`
@@ -402,6 +408,76 @@ assert.strictEqual(clozeTitleHtml, 'What G protein is the **[...]** coupled to?'
 // Cloze question with [...] already
 const clozeTitlePlain = formatClozeTitle('What G protein is the H2 histamine receptor coupled to? [...]');
 assert.strictEqual(clozeTitlePlain, 'What G protein is the H2 histamine receptor coupled to? **[...]**');
+
+// 9h. checkFrontmatterForCardId tests for linked-cards properties
+assert.strictEqual(checkFrontmatterForCardId({ 'linked-cards': [123456789] }, '123456789'), true);
+assert.strictEqual(checkFrontmatterForCardId({ 'linked-cards': ['123456789'] }, '123456789'), true);
+assert.strictEqual(checkFrontmatterForCardId({ 'linked-cards': 123456789 }, '123456789'), true);
+assert.strictEqual(checkFrontmatterForCardId({ 'linked-card': '123456789' }, '123456789'), true);
+assert.strictEqual(checkFrontmatterForCardId({ 'anki-cards': [123456789] }, '123456789'), true);
+assert.strictEqual(checkFrontmatterForCardId({ 'linked-cards': [999999999] }, '123456789'), false);
+assert.strictEqual(matchesCardId('obsidian://anki-card?cardId=123456789', '123456789'), true);
+
+// 9i. extractLinkedCardIdsFromFrontmatter & extractCardIdsFromText tests
+const extractedFm = extractLinkedCardIdsFromFrontmatter({
+	'linked-cards': [1001, 1002],
+	'anki-card-id': '1003',
+});
+assert.deepStrictEqual(extractedFm.sort(), [1001, 1002, 1003]);
+
+const extractedCardIds = extractCardIdsFromText(`
+Here is an embed:
+[Anki Card](obsidian://anki-card?cardId=2001)
+\`\`\`anki
+card: 2002
+\`\`\`
+`);
+assert.deepStrictEqual(extractedCardIds.sort(), [2001, 2002]);
+
+// 9j. findMatchingAnkiTag helper tests
+const cardTags = ['Cardiology::Pharmacology::Beta_Blockers', 'Pathology::Heart'];
+assert.strictEqual(findMatchingAnkiTag(cardTags, ['Beta Blockers', 'Neurology']), 'Beta Blockers');
+assert.strictEqual(findMatchingAnkiTag(cardTags, ['Heart']), 'Heart');
+assert.strictEqual(findMatchingAnkiTag(cardTags, ['Renal', 'GI']), null);
+assert.strictEqual(findMatchingAnkiTag([], ['Heart']), null);
+assert.strictEqual(findMatchingAnkiTag(cardTags, []), null);
+
+// 9k. syncNoteLinksWithSettings tests (deleting/adding cards from frontmatter properties)
+void (async () => {
+	const mockFile = { path: 'Notes/Cardio.md', basename: 'Cardio' } as unknown as import('obsidian').TFile;
+	let currentFm: Record<string, unknown> | null = { 'linked-cards': [1001] }; // 1002 was removed from properties!
+	const mockApp = {
+		metadataCache: {
+			getFileCache: (_file: unknown) => ({ frontmatter: currentFm }),
+		},
+		vault: {
+			cachedRead: async (_file: unknown) => 'Some note text without card links',
+		},
+	} as unknown as import('obsidian').App;
+
+	const testSettings = {
+		cardLinks: {
+			'1001': ['Notes/Cardio.md'],
+			'1002': ['Notes/Cardio.md'],
+		},
+	} as unknown as import('../src/types').AnkiEmbedSettings;
+
+	// 1. Deleting 1002 from properties prunes it from settings.cardLinks
+	const modified1 = await syncNoteLinksWithSettings(mockApp, mockFile, testSettings);
+	assert.strictEqual(modified1, true);
+	assert.deepStrictEqual(testSettings.cardLinks['1001'], ['Notes/Cardio.md']);
+	assert.strictEqual(testSettings.cardLinks['1002'], undefined);
+
+	// 2. Calling it again with no changes returns false
+	const modified2 = await syncNoteLinksWithSettings(mockApp, mockFile, testSettings);
+	assert.strictEqual(modified2, false);
+
+	// 3. Adding 1003 to properties adds it to settings.cardLinks
+	currentFm = { 'linked-cards': [1001, 1003] };
+	const modified3 = await syncNoteLinksWithSettings(mockApp, mockFile, testSettings);
+	assert.strictEqual(modified3, true);
+	assert.deepStrictEqual(testSettings.cardLinks['1003'], ['Notes/Cardio.md']);
+})();
 
 console.log('✅ All verification tests passed successfully!');
 

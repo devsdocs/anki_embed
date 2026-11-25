@@ -1879,3 +1879,13 @@
 	background: var(--background-modifier-hover);
 }
 
+.metadata-property[data-property-key="linked-cards"] .multi-select-pill-content,
+.metadata-property[data-property-key="anki-cards"] .multi-select-pill-content,
+.metadata-property[data-property-key="anki-tags"] .multi-select-pill-content,
+.metadata-property[data-property-key="anki-tag"] .multi-select-pill-content {
+	cursor: pointer;
+}
+
+
+
+

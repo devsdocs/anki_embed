@@ -36,6 +36,10 @@ export class AnkiView extends ItemView {
 			return `Anki: ${this.config.deck}`;
 		}
 		if (this.config.query) {
+			const tagMatch = this.config.query.match(/^tag:"([^"*]+)\*?"$/);
+			if (tagMatch?.[1]) {
+				return `Anki: #${tagMatch[1]}`;
+			}
 			return `Anki: ${this.config.query}`;
 		}
 		return 'Anki review';
@@ -65,6 +69,10 @@ export class AnkiView extends ItemView {
 		this.player?.resetToDeckPicker();
 	}
 
+	public invalidateLinksCache(cardId?: number): void {
+		this.player?.invalidateLinksCache(cardId);
+	}
+
 	async onClose(): Promise<void> {
 		this.contentEl.empty();
 		this.player?.destroy();
@@ -86,6 +94,7 @@ export class AnkiView extends ItemView {
 				excludeSuspended: typeof s.excludeSuspended === 'boolean' ? s.excludeSuspended : undefined,
 				order: s.order,
 				counts: typeof s.counts === 'boolean' ? s.counts : undefined,
+				live: typeof s.live === 'boolean' ? s.live : (s.card !== undefined || s.cardId !== undefined ? false : undefined),
 			};
 		}
 		await super.setState(state, result);
@@ -102,6 +111,7 @@ export class AnkiView extends ItemView {
 			filter: this.config.filter,
 			randomize: this.config.randomize,
 			select: this.config.select,
+			live: this.config.live,
 		};
 	}
 

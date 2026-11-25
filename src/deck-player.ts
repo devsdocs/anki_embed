@@ -2,16 +2,22 @@ import { sanitizeHTMLToDom, Notice, Menu, setTooltip, TFile } from 'obsidian';
 import type { App } from 'obsidian';
 import { AnkiClient } from './anki-client';
 import {
+	checkFrontmatterForCardId,
 	extractAnkiTagsFromNote,
 	extractAnkiTagsFromText,
 	extractAnswerHtml,
+	findMatchingAnkiTag,
 	formatCardHtml,
 	formatClozeTitle,
 	isClozeCard,
-	isTagMatch,
 	normalizeAnkiCss,
 	normalizeAnkiTag,
 } from './card-html';
+import {
+	linkCardToNote,
+	linkTagToNote,
+	unlinkCardFromNote,
+} from './link-service';
 import { AnkiRemoteConfigModal } from './remote-modal';
 import { NoteSelectModal } from './note-modal';
 import { TagSelectModal } from './tag-modal';
@@ -31,26 +37,6 @@ interface DeckNode {
 	name: string;
 	children: DeckNode[];
 	level: number;
-}
-
-function matchesCardId(val: unknown, cardIdStr: string): boolean {
-	if (typeof val === 'string' || typeof val === 'number') {
-		return String(val) === cardIdStr;
-	}
-	return false;
-}
-
-function checkFrontmatterForCardId(fm: Record<string, unknown>, cardIdStr: string): boolean {
-	const keys = ['anki-cards', 'anki-card-id', 'anki-card', 'cardId', 'card-id', 'card', 'cid', 'ankiCards', 'ankiCardId'];
-	for (const key of keys) {
-		const val = fm[key];
-		if (Array.isArray(val)) {
-			if (val.some((c) => matchesCardId(c, cardIdStr))) return true;
-		} else if (matchesCardId(val, cardIdStr)) {
-			return true;
-		}
-	}
-	return false;
 }
 
 function buildDeckTree(deckNames: string[]): DeckNode[] {
@@ -171,6 +157,9 @@ export class DeckPlayer {
 	private onGamepadDisconnectedHandler: ((e: GamepadEvent) => void) | null = null;
 
 	private get isLiveSync(): boolean {
+		if (this.config.card !== undefined || this.config.cardId !== undefined) {
+			return this.config.live === true;
+		}
 		return this.config.live ?? this.settings.liveSync;
 	}
 
@@ -3059,6 +3048,16 @@ ${normalizedCss}
 
 		menu.addSeparator();
 
+		menu.addItem((item) => {
+			item.setTitle('Copy card ID')
+				.setIcon('copy')
+				.onClick(() => {
+					void navigator.clipboard.writeText(String(card.cardId)).then(() => {
+						new Notice(`Copied card ID (${card.cardId}) to clipboard`);
+					});
+				});
+		});
+
 		const rawTitle = card.fields?.Front?.value || card.fields?.Text?.value || card.question || `Card ${card.cardId}`;
 		const plainTitle = this.generateCleanTitle(this.cleanHtmlToMarkdown(rawTitle), card.cardId);
 
@@ -3236,7 +3235,7 @@ ${normalizedCss}
 
 			const shouldAutoLink = this.settings.autoLinkExportedCard ?? true;
 			const ankiCardsBlock = shouldAutoLink
-				? `anki-cards:\n  - ${card.cardId}\nanki-card-id: ${card.cardId}\nanki-note-id: ${card.note ?? ''}`
+				? `linked-cards:\n  - "${card.cardId}"\nanki-card-id: "${card.cardId}"\nanki-note-id: ${card.note ?? ''}`
 				: `anki-note-id: ${card.note ?? ''}`;
 
 			const noteContent = `---
@@ -3388,11 +3387,28 @@ ${tagsSection}`;
 
 		// 1. Explicit links stored in settings.cardLinks (instant O(1))
 		const explicitPaths = this.settings.cardLinks?.[cardIdStr] ?? [];
+		const validExplicitPaths: string[] = [];
 		for (const path of explicitPaths) {
 			const file = this.app.vault.getAbstractFileByPath(path);
 			if (file instanceof TFile) {
+				const cache = this.app.metadataCache.getFileCache(file);
+				// If note has frontmatter properties but card was removed, prune from settings
+				if (cache?.frontmatter && !checkFrontmatterForCardId(cache.frontmatter, cardIdStr)) {
+					continue;
+				}
 				explicit.push(file);
 				seenPaths.add(file.path);
+				validExplicitPaths.push(path);
+			}
+		}
+		if (validExplicitPaths.length !== explicitPaths.length && this.settings.cardLinks) {
+			if (validExplicitPaths.length > 0) {
+				this.settings.cardLinks[cardIdStr] = validExplicitPaths;
+			} else {
+				delete this.settings.cardLinks[cardIdStr];
+			}
+			if (this.saveSettings) {
+				void this.saveSettings(this.settings);
 			}
 		}
 
@@ -3424,17 +3440,7 @@ ${tagsSection}`;
 			// Tag-based note linking
 			if (shouldScanTagLinks && cardTags.length > 0) {
 				const noteTags = extractAnkiTagsFromNote(cache);
-				let matchedTag: string | null = null;
-				for (const noteTag of noteTags) {
-					for (const cardTag of cardTags) {
-						if (isTagMatch(cardTag, noteTag)) {
-							matchedTag = noteTag;
-							break;
-						}
-					}
-					if (matchedTag) break;
-				}
-
+				const matchedTag = findMatchingAnkiTag(cardTags, noteTags);
 				if (matchedTag) {
 					tagLinks.push({ file, matchedTag });
 					seenPaths.add(file.path);
@@ -3512,6 +3518,8 @@ ${tagsSection}`;
 
 		const cardIdStr = String(cardId);
 		const files = this.app.vault.getMarkdownFiles();
+		const cardRegex = new RegExp(`(?:^|\\n)\\s*card(?:Id)?:\\s*${cardIdStr}\\b`);
+		const uriRegex = new RegExp(`obsidian:\\/\\/(?:anki-card|anki-embed)\\?[^)\\s]*cardId=${cardIdStr}\\b`);
 
 		for (const file of files) {
 			if (seenPaths.has(file.path)) continue;
@@ -3530,16 +3538,7 @@ ${tagsSection}`;
 			// Check tags from cache
 			if (shouldScanTagLinks && cardTags.length > 0 && cache) {
 				const noteTags = extractAnkiTagsFromNote(cache);
-				let matchedTag: string | null = null;
-				for (const noteTag of noteTags) {
-					for (const cardTag of cardTags) {
-						if (isTagMatch(cardTag, noteTag)) {
-							matchedTag = noteTag;
-							break;
-						}
-					}
-					if (matchedTag) break;
-				}
+				const matchedTag = findMatchingAnkiTag(cardTags, noteTags);
 				if (matchedTag) {
 					tagLinks.push({ file, matchedTag });
 					seenPaths.add(file.path);
@@ -3554,16 +3553,7 @@ ${tagsSection}`;
 				// Check tag matches in content
 				if (shouldScanTagLinks && cardTags.length > 0 && (content.includes('anki-tag') || content.includes('#anki'))) {
 					const textTags = extractAnkiTagsFromText(content);
-					let matchedTag: string | null = null;
-					for (const noteTag of textTags) {
-						for (const cardTag of cardTags) {
-							if (isTagMatch(cardTag, noteTag)) {
-								matchedTag = noteTag;
-								break;
-							}
-						}
-						if (matchedTag) break;
-					}
+					const matchedTag = findMatchingAnkiTag(cardTags, textTags);
 					if (matchedTag) {
 						tagLinks.push({ file, matchedTag });
 						seenPaths.add(file.path);
@@ -3577,8 +3567,8 @@ ${tagsSection}`;
 						content.includes(`card=${cardIdStr}`) ||
 						content.includes(`cid:${cardIdStr}`) ||
 						content.includes(`cid=${cardIdStr}`) ||
-						new RegExp(`(?:^|\\n)\\s*card(?:Id)?:\\s*${cardIdStr}\\b`).test(content) ||
-						new RegExp(`obsidian:\\/\\/(?:anki-card|anki-embed)\\?[^)\\s]*cardId=${cardIdStr}\\b`).test(content);
+						cardRegex.test(content) ||
+						uriRegex.test(content);
 
 					if (isTargetMatch) {
 						backlinks.push(file);
@@ -3597,19 +3587,7 @@ ${tagsSection}`;
 
 	public async linkNoteToCard(file: TFile, cardId: number): Promise<void> {
 		this.linkedNotesCache.delete(cardId);
-		const cardIdStr = String(cardId);
-		if (!this.settings.cardLinks) {
-			this.settings.cardLinks = {};
-		}
-		const links = this.settings.cardLinks[cardIdStr] ?? [];
-		if (!links.includes(file.path)) {
-			links.push(file.path);
-			this.settings.cardLinks[cardIdStr] = links;
-			if (this.saveSettings) {
-				await this.saveSettings(this.settings);
-			}
-		}
-
+		await linkCardToNote(this.app, file, cardId, this.settings, this.saveSettings);
 		new Notice(`Linked "${file.basename}" to Anki card`);
 		this.updateLinksButton();
 	}
@@ -3617,23 +3595,7 @@ ${tagsSection}`;
 	public async linkTagToNote(file: TFile, tag: string, cardId?: number): Promise<void> {
 		if (!this.app) return;
 		try {
-			await this.app.fileManager.processFrontMatter(file, (fmData: Record<string, unknown>) => {
-				const existing = fmData['anki-tags'] ?? fmData['anki-tag'] ?? fmData['anki_tags'] ?? fmData['anki_tag'];
-				if (Array.isArray(existing)) {
-					if (!existing.includes(tag)) {
-						existing.push(tag);
-						fmData['anki-tags'] = existing;
-					}
-				} else if (typeof existing === 'string') {
-					if (existing !== tag) {
-						fmData['anki-tags'] = [existing, tag];
-						delete fmData['anki-tag'];
-						delete fmData['anki_tag'];
-					}
-				} else {
-					fmData['anki-tag'] = tag;
-				}
-			});
+			await linkTagToNote(this.app, file, tag);
 			new Notice(`Linked Anki tag "${tag}" to "${file.basename}"`);
 			if (cardId !== undefined) {
 				this.linkedNotesCache.delete(cardId);
@@ -3650,48 +3612,17 @@ ${tagsSection}`;
 
 	public async unlinkNoteFromCard(file: TFile, cardId: number): Promise<void> {
 		this.linkedNotesCache.delete(cardId);
-		const cardIdStr = String(cardId);
-		if (this.settings.cardLinks?.[cardIdStr]) {
-			this.settings.cardLinks[cardIdStr] = this.settings.cardLinks[cardIdStr].filter((p) => p !== file.path);
-			if (this.settings.cardLinks[cardIdStr].length === 0) {
-				delete this.settings.cardLinks[cardIdStr];
-			}
-			if (this.saveSettings) {
-				await this.saveSettings(this.settings);
-			}
-		}
-
-		if (this.app) {
-			const cache = this.app.metadataCache.getFileCache(file);
-			const fm = cache?.frontmatter;
-			if (fm && (fm['anki-cards'] || fm['anki-card-id'] || fm['anki-card'])) {
-				try {
-					await this.app.fileManager.processFrontMatter(file, (fmData: Record<string, unknown>) => {
-						const ankiCards = fmData['anki-cards'];
-						if (Array.isArray(ankiCards)) {
-							const filtered = ankiCards.filter((c) => !matchesCardId(c, cardIdStr));
-							if (filtered.length > 0) {
-								fmData['anki-cards'] = filtered;
-							} else {
-								delete fmData['anki-cards'];
-							}
-						} else if (matchesCardId(ankiCards, cardIdStr)) {
-							delete fmData['anki-cards'];
-						}
-						if (matchesCardId(fmData['anki-card-id'], cardIdStr)) {
-							delete fmData['anki-card-id'];
-						}
-						if (matchesCardId(fmData['anki-card'], cardIdStr)) {
-							delete fmData['anki-card'];
-						}
-					});
-				} catch {
-					// Frontmatter cleanup is best effort
-				}
-			}
-		}
-
+		await unlinkCardFromNote(this.app, file, cardId, this.settings, this.saveSettings);
 		new Notice(`Unlinked "${file.basename}" from Anki card`);
+		this.updateLinksButton();
+	}
+
+	public invalidateLinksCache(cardId?: number): void {
+		if (cardId !== undefined) {
+			this.linkedNotesCache.delete(cardId);
+		} else {
+			this.linkedNotesCache.clear();
+		}
 		this.updateLinksButton();
 	}
 

@@ -5,9 +5,18 @@ import { AnkiView } from './src/anki-view';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
 import { TagSelectModal } from './src/tag-modal';
+import { LinkedCardsManageModal } from './src/linked-cards-modal';
 import { AnkiImportModal } from './src/import-modal';
 import { AnkiRemoteConfigModal } from './src/remote-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
+import { normalizeAnkiTag } from './src/card-html';
+import {
+	getLinkedCardIdsForNote,
+	linkTagToNote,
+	syncNoteLinksWithSettings,
+	unlinkAllCardsFromNote,
+	unlinkCardFromNote,
+} from './src/link-service';
 import {
 	AnkiEmbedSettings,
 	DEFAULT_GAMEPAD_MAPPING,
@@ -105,10 +114,19 @@ export default class AnkiEmbedPlugin extends Plugin {
 		// Register obsidian:// protocol handlers for clickable card links
 		this.registerObsidianProtocolHandler('anki-card', (params) => {
 			const cardId = params['cardId'] || params['card'] || params['cid'];
+			const action = params['action'];
 			if (cardId) {
 				const num = Number.parseInt(cardId, 10);
 				if (!Number.isNaN(num) && num > 0) {
-					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false });
+					if (action === 'unlink') {
+						const filePath = params['file'];
+						const target = filePath ? this.app.vault.getAbstractFileByPath(filePath) : this.app.workspace.getActiveFile();
+						if (target instanceof TFile) {
+							void this.unlinkCardFromNote(target, num);
+							return;
+						}
+					}
+					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false, live: false });
 				}
 			}
 		});
@@ -118,7 +136,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 			if (cardId) {
 				const num = Number.parseInt(cardId, 10);
 				if (!Number.isNaN(num) && num > 0) {
-					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false });
+					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false, live: false });
 				}
 			} else if (params['deck']) {
 				void this.activateView({ deck: params['deck'], select: false });
@@ -260,27 +278,183 @@ export default class AnkiEmbedPlugin extends Plugin {
 				}).open();
 			},
 		});
+
+		this.addCommand({
+			id: 'manage-linked-anki-cards',
+			name: 'Manage linked Anki cards for active note',
+			callback: () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice('Please open a note first to manage linked Anki cards.');
+					return;
+				}
+				void this.openLinkedCardsModal(activeFile);
+			},
+		});
+
+		this.addCommand({
+			id: 'unlink-anki-cards-from-note',
+			name: 'Unlink Anki cards from active note',
+			callback: () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice('Please open a note first to unlink Anki cards.');
+					return;
+				}
+				void this.openLinkedCardsModal(activeFile);
+			},
+		});
+
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					menu.addItem((item) => {
+						item.setTitle('Manage linked Anki cards')
+							.setIcon('link')
+							.onClick(() => {
+								void this.openLinkedCardsModal(file);
+							});
+					});
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.workspace.on('editor-menu', (menu, _editor, info) => {
+				const file = info.file;
+				if (file instanceof TFile && file.extension === 'md') {
+					menu.addItem((item) => {
+						item.setTitle('Manage linked Anki cards')
+							.setIcon('link')
+							.onClick(() => {
+								void this.openLinkedCardsModal(file);
+							});
+					});
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.metadataCache.on('changed', (file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					void this.handleNoteMetadataChanged(file);
+				}
+			})
+		);
+
+		// Click on a linked card chip in Properties to open that card in Anki review
+		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+			const target = evt.target as HTMLElement | null;
+			if (!target) return;
+
+			// Strictly only trigger when clicking directly on the pill content (the card ID text)
+			const pillContent = target.closest<HTMLElement>('.multi-select-pill-content');
+			if (!pillContent) return;
+
+			// Ensure it is inside a card-linking property
+			const propEl = pillContent.closest<HTMLElement>('.metadata-property');
+			if (!propEl) return;
+
+			const key = propEl.getAttribute('data-property-key');
+			const cardKeys = [
+				'linked-cards',
+				'linked-card',
+				'linkedCards',
+				'linkedCard',
+				'linked_cards',
+				'linked_card',
+				'anki-cards',
+				'anki-card-id',
+				'anki-card',
+			];
+			const tagKeys = ['anki-tags', 'anki-tag', 'anki_tags', 'anki_tag'];
+
+			if (!key) return;
+
+			if (cardKeys.includes(key)) {
+				const match = pillContent.textContent?.match(/\b(\d{8,})\b/);
+				if (match?.[1]) {
+					const cardId = Number.parseInt(match[1], 10);
+					if (!Number.isNaN(cardId) && cardId > 0) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						void this.activateView({ card: cardId, cardId, query: `cid:${cardId}`, select: false, live: false });
+					}
+				}
+			} else if (tagKeys.includes(key)) {
+				const rawTag = pillContent.textContent?.trim() ?? '';
+				const cleanTag = normalizeAnkiTag(rawTag);
+				if (cleanTag) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					void this.activateView({ query: `tag:"${cleanTag}*"`, select: false, live: false });
+				}
+			}
+		});
+	}
+
+	private async handleNoteMetadataChanged(file: TFile): Promise<void> {
+		const modified = await syncNoteLinksWithSettings(this.app, file, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+		if (modified) {
+			const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+			for (const leaf of leaves) {
+				if (leaf.view instanceof AnkiView) {
+					leaf.view.invalidateLinksCache();
+				}
+			}
+		}
+	}
+
+	async getLinkedCardIdsForNote(file: TFile): Promise<number[]> {
+		return getLinkedCardIdsForNote(this.app, file, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+	}
+
+	async unlinkCardFromNote(file: TFile, cardId: number): Promise<void> {
+		await unlinkCardFromNote(this.app, file, cardId, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+		new Notice(`Unlinked card ${cardId} from "${file.basename}"`);
+	}
+
+	async unlinkAllCardsFromNote(file: TFile): Promise<void> {
+		const cardIds = await this.getLinkedCardIdsForNote(file);
+		await unlinkAllCardsFromNote(this.app, file, cardIds, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+		new Notice(`Unlinked ${cardIds.length} card(s) from "${file.basename}"`);
+	}
+
+	async openLinkedCardsModal(file: TFile): Promise<void> {
+		const cardIds = await this.getLinkedCardIdsForNote(file);
+		if (cardIds.length === 0) {
+			new Notice(`No Anki cards linked to "${file.basename}".`);
+			return;
+		}
+
+		new LinkedCardsManageModal(
+			this.app,
+			this.client,
+			file,
+			cardIds,
+			(cardId) => {
+				void this.activateView({ card: cardId, cardId, query: `cid:${cardId}`, select: false, live: false });
+			},
+			async (cardId) => {
+				await this.unlinkCardFromNote(file, cardId);
+			},
+			async () => {
+				await this.unlinkAllCardsFromNote(file);
+			}
+		).open();
 	}
 
 	async linkTagToNote(file: TFile, tag: string): Promise<void> {
 		try {
-			await this.app.fileManager.processFrontMatter(file, (fmData: Record<string, unknown>) => {
-				const existing = fmData['anki-tags'] ?? fmData['anki-tag'] ?? fmData['anki_tags'] ?? fmData['anki_tag'];
-				if (Array.isArray(existing)) {
-					if (!existing.includes(tag)) {
-						existing.push(tag);
-						fmData['anki-tags'] = existing;
-					}
-				} else if (typeof existing === 'string') {
-					if (existing !== tag) {
-						fmData['anki-tags'] = [existing, tag];
-						delete fmData['anki-tag'];
-						delete fmData['anki_tag'];
-					}
-				} else {
-					fmData['anki-tag'] = tag;
-				}
-			});
+			await linkTagToNote(this.app, file, tag);
 			new Notice(`Linked Anki tag "${tag}" to "${file.basename}"`);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -289,6 +463,9 @@ export default class AnkiEmbedPlugin extends Plugin {
 	}
 
 	async activateView(config?: DeckEmbedConfig, newTab: boolean = true): Promise<AnkiView> {
+		if (config && (config.card !== undefined || config.cardId !== undefined) && config.live === undefined) {
+			config.live = false;
+		}
 		let leaf: WorkspaceLeaf | null = null;
 		if (!newTab) {
 			const existingLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);

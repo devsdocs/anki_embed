@@ -35,6 +35,120 @@ export function isClozeCard(card?: { modelName?: string; question?: string; answ
 	return false;
 }
 
+export function matchesCardId(val: unknown, cardIdStr: string): boolean {
+	if (typeof val === 'string' || typeof val === 'number') {
+		const str = String(val).trim();
+		return (
+			str === cardIdStr ||
+			str.includes(`cardId=${cardIdStr}`) ||
+			str.includes(`card=${cardIdStr}`) ||
+			str.includes(`cid:${cardIdStr}`) ||
+			str.includes(`cid=${cardIdStr}`)
+		);
+	}
+	return false;
+}
+
+export function checkFrontmatterForCardId(fm: Record<string, unknown>, cardIdStr: string): boolean {
+	const keys = [
+		'linked-cards',
+		'linked-card',
+		'linkedCards',
+		'linkedCard',
+		'linked_cards',
+		'linked_card',
+		'anki-cards',
+		'anki-card-id',
+		'anki-card',
+		'cardId',
+		'card-id',
+		'card',
+		'cid',
+		'ankiCards',
+		'ankiCardId',
+	];
+	for (const key of keys) {
+		const val = fm[key];
+		if (Array.isArray(val)) {
+			if (val.some((c) => matchesCardId(c, cardIdStr))) return true;
+		} else if (matchesCardId(val, cardIdStr)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+export function extractLinkedCardIdsFromFrontmatter(fm?: Record<string, unknown> | null): number[] {
+	if (!fm) return [];
+	const cardIds = new Set<number>();
+	const keys = [
+		'linked-cards',
+		'linked-card',
+		'linkedCards',
+		'linkedCard',
+		'linked_cards',
+		'linked_card',
+		'anki-cards',
+		'anki-card-id',
+		'anki-card',
+		'cardId',
+		'card-id',
+		'card',
+		'cid',
+		'ankiCards',
+		'ankiCardId',
+	];
+
+	for (const key of keys) {
+		const val = fm[key];
+		const parseNum = (v: unknown): void => {
+			if (typeof v === 'number') {
+				cardIds.add(v);
+			} else if (typeof v === 'string') {
+				const trimmed = v.trim();
+				const num = Number.parseInt(trimmed, 10);
+				if (!Number.isNaN(num) && num > 0) {
+					cardIds.add(num);
+				} else {
+					const uriMatch = trimmed.match(/[?&]card(?:Id)?=(\d+)\b/i) ?? trimmed.match(/\b(?:cid:)?(\d{8,})\b/);
+					if (uriMatch?.[1]) {
+						const uriNum = Number.parseInt(uriMatch[1], 10);
+						if (!Number.isNaN(uriNum) && uriNum > 0) {
+							cardIds.add(uriNum);
+						}
+					}
+				}
+			}
+		};
+
+		if (Array.isArray(val)) {
+			for (const item of val) {
+				parseNum(item);
+			}
+		} else if (val !== undefined && val !== null) {
+			parseNum(val);
+		}
+	}
+
+	return Array.from(cardIds);
+}
+
+export function extractCardIdsFromText(content: string): number[] {
+	if (!content) return [];
+	const cardIds = new Set<number>();
+	const uriMatches = content.matchAll(/[?&]card(?:Id)?=(\d+)\b/gi);
+	for (const m of uriMatches) {
+		const num = Number.parseInt(m[1] ?? '', 10);
+		if (!Number.isNaN(num) && num > 0) cardIds.add(num);
+	}
+	const codeblockMatches = content.matchAll(/```anki\b[\s\S]*?\bcard(?:Id)?:\s*(\d+)\b[\s\S]*?```/gi);
+	for (const m of codeblockMatches) {
+		const num = Number.parseInt(m[1] ?? '', 10);
+		if (!Number.isNaN(num) && num > 0) cardIds.add(num);
+	}
+	return Array.from(cardIds);
+}
+
 export function normalizeAnkiTag(tag: string): string {
 	if (!tag) return '';
 	let clean = tag.trim();
@@ -168,6 +282,18 @@ export function isTagMatch(cardTag: string, noteTag: string): boolean {
 	}
 
 	return false;
+}
+
+export function findMatchingAnkiTag(cardTags: string[], noteTags: string[]): string | null {
+	if (!cardTags.length || !noteTags.length) return null;
+	for (const noteTag of noteTags) {
+		for (const cardTag of cardTags) {
+			if (isTagMatch(cardTag, noteTag)) {
+				return noteTag;
+			}
+		}
+	}
+	return null;
 }
 
 export function extractAnkiTagsFromNote(
