@@ -153,6 +153,28 @@ export default class AnkiEmbedPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'toggle-anki-fullscreen-review',
+			name: 'Toggle Anki fullscreen review mode',
+			callback: () => {
+				const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+				for (const leaf of leaves) {
+					if (leaf.view instanceof AnkiView) {
+						leaf.view.toggleAnkiFullscreen();
+						return;
+					}
+				}
+				void this.activateView().then(() => {
+					const activeLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+					for (const leaf of activeLeaves) {
+						if (leaf.view instanceof AnkiView) {
+							leaf.view.toggleAnkiFullscreen(true);
+						}
+					}
+				});
+			},
+		});
+
+		this.addCommand({
 			id: 'open-anki-deck-in-full-view',
 			name: 'Open Anki deck in full view',
 			callback: () => {

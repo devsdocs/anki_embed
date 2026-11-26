@@ -274,6 +274,24 @@ export interface AnkiCardInfo {
 	nextReviews?: string[];
 }
 
+export interface AnkiFlagConfig {
+	id: number;
+	name: string;
+	color: string;
+	darkColor: string;
+	shortcut: string;
+}
+
+export const ANKI_FLAG_CONFIGS: Record<number, AnkiFlagConfig> = {
+	1: { id: 1, name: 'Red', color: '#e53935', darkColor: '#ff5252', shortcut: 'ctrl+1' },
+	2: { id: 2, name: 'Orange', color: '#fb8c00', darkColor: '#ffa726', shortcut: 'ctrl+2' },
+	3: { id: 3, name: 'Green', color: '#43a047', darkColor: '#66bb6a', shortcut: 'ctrl+3' },
+	4: { id: 4, name: 'Blue', color: '#1e88e5', darkColor: '#42a5f5', shortcut: 'ctrl+4' },
+	5: { id: 5, name: 'Pink', color: '#d81b60', darkColor: '#ec407a', shortcut: 'ctrl+5' },
+	6: { id: 6, name: 'Turquoise', color: '#00acc1', darkColor: '#26c6da', shortcut: 'ctrl+6' },
+	7: { id: 7, name: 'Purple', color: '#8e24aa', darkColor: '#ab47bc', shortcut: 'ctrl+7' },
+};
+
 export interface AnkiNoteMedia {
 	url?: string;
 	path?: string;

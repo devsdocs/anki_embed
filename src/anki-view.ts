@@ -63,7 +63,15 @@ export class AnkiView extends ItemView {
 			this.resetView();
 		});
 
+		this.addAction('maximize', 'Toggle Anki fullscreen mode (f11)', () => {
+			this.player?.toggleAnkiFullscreen();
+		});
+
 		this.renderPlayer();
+	}
+
+	public toggleAnkiFullscreen(enable?: boolean): void {
+		this.player?.toggleAnkiFullscreen(enable);
 	}
 
 	public resetView(): void {

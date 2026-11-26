@@ -170,6 +170,10 @@ export class AnkiClient {
 		return await this.request<boolean>('suspend', { cards });
 	}
 
+	public async buryCards(cards: number[]): Promise<boolean> {
+		return await this.request<boolean>('buryCards', { cards });
+	}
+
 	public async unsuspendCards(cards: number[]): Promise<boolean> {
 		return await this.request<boolean>('unsuspend', { cards });
 	}

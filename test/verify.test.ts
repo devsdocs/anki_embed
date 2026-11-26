@@ -1,4 +1,6 @@
 import assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import { parseDeckConfig, parsePastedAnkiText } from '../src/parser';
 import { AnkiClient } from '../src/anki-client';
 import {
@@ -21,8 +23,9 @@ import {
 	parseTagItem,
 	renderClozeDeletion,
 	sortCardsForLearningMode,
+	isDeckOrSubdeck,
 } from '../src/card-html';
-import { AnkiCardInfo, DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
+import { AnkiCardInfo, ANKI_FLAG_CONFIGS, DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 import { linkTagToNote, syncNoteLinksWithSettings } from '../src/link-service';
 
 // 3e. Test parseDeckConfig - links and backlinks config
@@ -618,6 +621,103 @@ learning_order: due-new-future
 	assert.strictEqual(getCardStatusPill(c3, dueIds).label, 'Due');
 	assert.strictEqual(getCardStatusPill(c4, dueIds).label, 'New');
 	assert.strictEqual(getCardStatusPill(c6, dueIds).label, 'Early');
+
+	// Fullscreen client methods test
+	const dummyClient = new AnkiClient('http://127.0.0.1:8765');
+	assert.strictEqual(typeof dummyClient.buryCards, 'function');
+	assert.strictEqual(typeof dummyClient.suspendCards, 'function');
+	assert.strictEqual(typeof dummyClient.getDeckStats, 'function');
+	assert.strictEqual(typeof dummyClient.guiCurrentCard, 'function');
+
+	// Flag configurations test
+	assert.strictEqual(Object.keys(ANKI_FLAG_CONFIGS).length, 7);
+	assert.strictEqual(ANKI_FLAG_CONFIGS[1]?.name, 'Red');
+	assert.strictEqual(ANKI_FLAG_CONFIGS[2]?.name, 'Orange');
+	assert.strictEqual(ANKI_FLAG_CONFIGS[3]?.name, 'Green');
+	assert.strictEqual(ANKI_FLAG_CONFIGS[4]?.name, 'Blue');
+	assert.strictEqual(ANKI_FLAG_CONFIGS[5]?.name, 'Pink');
+	assert.strictEqual(ANKI_FLAG_CONFIGS[6]?.name, 'Turquoise');
+	assert.strictEqual(ANKI_FLAG_CONFIGS[7]?.name, 'Purple');
+
+	for (let i = 1; i <= 7; i++) {
+		const cfg = ANKI_FLAG_CONFIGS[i];
+		assert.ok(cfg);
+		assert.strictEqual(cfg.id, i);
+		assert.ok(cfg.color.startsWith('#'));
+		assert.ok(cfg.darkColor.startsWith('#'));
+		assert.strictEqual(cfg.shortcut, `ctrl+${i}`);
+	}
+
+	// Verify Side Note and Collapsed Tags styles exist
+	const cssContent = fs.readFileSync(path.join(__dirname, '../styles.css'), 'utf8');
+	assert.ok(cssContent.includes('.anki-links-card-tags-list.is-collapsed'), 'Has collapsed tags class');
+	assert.ok(cssContent.includes('.anki-links-side-btn'), 'Has side by side button class');
+	assert.ok(cssContent.includes('.anki-fs-side-note'), 'Has fullscreen side note class');
+	assert.ok(cssContent.includes('.anki-embed-container.is-anki-fullscreen.has-side-note'), 'Has side note layout styles');
+	assert.ok(cssContent.includes('.anki-embed-container.is-anki-fullscreen.has-side-note .anki-fs-topbar'), 'Has topbar centering on card');
+	assert.ok(cssContent.includes('.anki-fs-links-indicator'), 'Has glowing purple links indicator class');
+
+	// Verify isDeckOrSubdeck hierarchy check
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1::Path/Pharm', 'AnKing Step 1'), true);
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1::Path/Pharm::Cardiac', 'AnKing Step 1'), true);
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1', 'AnKing Step 1'), true);
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 2', 'AnKing Step 1'), false);
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 10', 'AnKing Step 1'), false);
+	assert.strictEqual(isDeckOrSubdeck(undefined, 'AnKing Step 1'), false);
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1', undefined), false);
+
+	// Verify fullscreen exit button and styles
+	assert.ok(cssContent.includes('.anki-embed-btn-icon.anki-embed-fs-btn.is-active'), 'Has fullscreen exit button style');
+	const deckPlayerContent = fs.readFileSync(path.join(__dirname, '../src/deck-player.ts'), 'utf8');
+	assert.ok(deckPlayerContent.includes('Exit Anki fullscreen mode (esc)'), 'Has exit button title');
+	assert.ok(deckPlayerContent.includes('this.toggleAnkiFullscreen(false)'), 'Calls toggleAnkiFullscreen(false) on exit');
+
+	// Verify mode selection modal and warning dialog styles & logic
+	assert.ok(cssContent.includes('.anki-mode-select-overlay'), 'Has mode select overlay style');
+	assert.ok(cssContent.includes('.anki-mode-select-modal'), 'Has mode select modal style');
+	assert.ok(cssContent.includes('.anki-mode-warning-header'), 'Has mode warning header style');
+	assert.ok(cssContent.includes('.anki-links-meta-row'), 'Has links meta row style');
+	assert.ok(deckPlayerContent.includes('anki-links-meta-row'), 'Uses metaRow in deck player');
+	assert.ok(deckPlayerContent.includes('promptDeckReviewMode'), 'Has promptDeckReviewMode method');
+	assert.ok(deckPlayerContent.includes('Different deck open in Anki app'), 'Has warning screen header');
+	assert.ok(deckPlayerContent.includes('Do you want to proceed with the deck open in the Anki app'), 'Has warning prompt message');
+	assert.ok(deckPlayerContent.includes('this.config.live = false;'), 'Sets remote mode on remote select');
+	assert.ok(deckPlayerContent.includes('this.config.live = true;'), 'Sets live sync mode on live select');
+
+	// Verify review screen warning & deck picker subdeck counts
+	assert.ok(cssContent.includes('.anki-deck-mismatch-desc'), 'Has deck mismatch description style');
+	assert.ok(cssContent.includes('.anki-mismatch-actions'), 'Has mismatch actions container');
+	assert.ok(cssContent.includes('.anki-mismatch-icon-badge'), 'Has red alert circle icon badge');
+	assert.ok(deckPlayerContent.includes('rollupDeckNodeCounts'), 'Has subdeck node counts rollup');
+	assert.ok(deckPlayerContent.includes('nodeCountsMap'), 'Uses node counts map for deck tree nodes');
+	assert.ok(deckPlayerContent.includes('Anki desktop has a different deck open'), 'Has start screen deck mismatch title');
+	assert.ok(deckPlayerContent.includes('Start synced session with'), 'Has start synced session with Anki deck button');
+	assert.ok(deckPlayerContent.includes('in remote deck mode'), 'Has review in remote deck mode button');
+	assert.ok(deckPlayerContent.includes('renderStartScreenLive(currentCard, isMismatch ? chosenDeck : undefined)'), 'Calls start screen with mismatch deck');
+
+	// Verify command palette and fullscreen toast notice support
+	assert.ok(cssContent.includes('.anki-fs-toast'), 'Has fullscreen toast notification style');
+	assert.ok(deckPlayerContent.includes('showFullscreenToast'), 'Has showFullscreenToast helper');
+	assert.ok(!deckPlayerContent.includes("text: '⌘ commands'"), 'Commands button removed from top notch pill');
+	assert.ok(cssContent.includes('.modal-container'), 'Has modal-container z-index elevation in fullscreen');
+	assert.ok(deckPlayerContent.includes('command-palette:open'), 'Handles command palette invocation');
+	assert.ok(deckPlayerContent.includes('switcher:open'), 'Handles quick switcher invocation');
+	assert.ok(deckPlayerContent.includes('Exit fullscreen mode (esc) to use Obsidian commands'), 'Notifies user to exit fullscreen for commands');
+	assert.ok(deckPlayerContent.includes('targetEl = this.container'), 'Native fullscreen is requested on container');
+	assert.ok(cssContent.includes('z-index: 99999 !important;'), 'Fullscreen container has top z-index');
+	assert.ok(deckPlayerContent.includes("cls: 'anki-links-tag-badge', text: item.matchedTag"), 'Tagged notes badge does not include tag icon');
+	assert.ok(!deckPlayerContent.includes("cls: 'anki-links-tag-badge', text: `🏷️ ${item.matchedTag}`"), 'Does not prepend tag emoji inside tag badge');
+	assert.ok(deckPlayerContent.includes("cls: 'anki-fs-nav-btn anki-fs-nav-decks',\n\t\t\ttext: 'Decks'"), 'Fullscreen top notch decks button uses Decks text');
+
+	// Verify live sync auto-start on match and equal-width start screen buttons
+	assert.ok(deckPlayerContent.includes('const isMatch = Boolean(chosenDeck && ankiDeck && chosenDeck.toLowerCase() === ankiDeck.toLowerCase());'), 'Checks for matching open Anki deck');
+	assert.ok(deckPlayerContent.includes('if (isMatch) {\n\t\t\t\t\tthis.hasStarted = true;'), 'Automatically starts live sync when selected deck matches active Anki deck');
+	assert.ok(cssContent.includes('.anki-start-actions,'), 'Has start screen actions container style');
+	assert.ok(cssContent.includes('.anki-start-btn,'), 'Has equal-width start button style');
+	assert.ok(deckPlayerContent.includes("cls: 'anki-start-actions'"), 'Wraps start buttons in anki-start-actions');
+	assert.ok(deckPlayerContent.includes("cls: 'anki-embed-flip-btn anki-start-btn'"), 'Start synced session has anki-start-btn class');
+	assert.ok(deckPlayerContent.includes("cls: 'anki-embed-btn-secondary anki-start-btn'"), 'Switch to offline mode has anki-start-btn class');
+	assert.ok(deckPlayerContent.includes("cls: 'anki-embed-btn-secondary anki-start-btn anki-start-back-btn'"), 'Back button has anki-start-btn class');
 })();
 
 console.log('✅ All verification tests passed successfully!');

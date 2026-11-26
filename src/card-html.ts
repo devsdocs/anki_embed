@@ -23,6 +23,12 @@ export function normalizeAnkiCss(css: string): string {
 	return css.replace(/\b(?:html|body)\b/g, '.card');
 }
 
+export function isDeckOrSubdeck(cardDeck: string | undefined, targetDeck: string | undefined): boolean {
+	if (!cardDeck || !targetDeck) return false;
+	if (cardDeck === targetDeck) return true;
+	return cardDeck.startsWith(`${targetDeck}::`);
+}
+
 export function isClozeCard(card?: { modelName?: string; question?: string; answer?: string }): boolean {
 	if (!card) return false;
 	if (card.modelName && card.modelName.toLowerCase().includes('cloze')) {
