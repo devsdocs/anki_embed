@@ -1,5 +1,5 @@
 import { sanitizeHTMLToDom, Notice, Menu, setTooltip, TFile, setIcon, Component, MarkdownRenderer } from 'obsidian';
-import type { App } from 'obsidian';
+import type { App, EventRef } from 'obsidian';
 import { AnkiClient } from './anki-client';
 import {
 	checkFrontmatterForCardId,
@@ -7,6 +7,8 @@ import {
 	extractAnkiTagsFromText,
 	extractAnswerHtml,
 	findMatchingAnkiTag,
+	isDeckOrSubdeck,
+	isSameDeck,
 	formatCardHtml,
 	formatClozeTitle,
 	getCardStatusPill,
@@ -134,6 +136,12 @@ export class DeckPlayer {
 	private linkedNotesCache = new Map<number, CardLinkedNotes<TFile>>();
 	private cardTagsCache = new Map<number, string[]>();
 	private activeLinksDropdown: HTMLElement | null = null;
+	/** Re-renders the open links dropdown; set while one is open. */
+	private refreshActiveLinksDropdown: (() => void) | null = null;
+	/** Cards whose real tags have been fetched from Anki (not just scraped from the card's HTML). */
+	private realTagsLoaded = new Set<number>();
+	private vaultEventRefs: EventRef[] = [];
+	private linksRefreshTimer: number | null = null;
 	private linksDropdownCleanup: (() => void) | null = null;
 	private isPollingLiveCard = false;
 	private isReviewingLiveCard = false;
@@ -145,6 +153,9 @@ export class DeckPlayer {
 	private currentCounts: { new: number; learn: number; review: number; early?: number } | null = null;
 	private dueCardIds: Set<number> = new Set<number>();
 	private hasAcknowledgedEarlyReviews: boolean = false;
+	/** True while an offline answer is being saved to Anki, so a second key press can't grade twice. */
+	private isSavingAnswer = false;
+	private hasShownBrowseNotice = false;
 	private cardTimerInterval: number | null = null;
 	private timeStreak: number = 0;
 	private timerExceededForCurrentCard: boolean = false;
@@ -324,6 +335,7 @@ export class DeckPlayer {
 
 		this.setupSelectionListeners();
 		this.registerKeyboardShortcuts();
+		this.watchVaultForLinkChanges();
 		if (typeof document !== 'undefined') {
 			document.addEventListener('keydown', this.documentKeydownHandler);
 			document.addEventListener('fullscreenchange', this.fullscreenChangeHandler);
@@ -830,27 +842,19 @@ export class DeckPlayer {
 			this.currentIndex = 0;
 
 			const ankiDeck = currentCard.deckName;
-			const isMismatch = Boolean(chosenDeck && ankiDeck && chosenDeck.toLowerCase() !== ankiDeck.toLowerCase());
-			const isMatch = Boolean(chosenDeck && ankiDeck && chosenDeck.toLowerCase() === ankiDeck.toLowerCase());
+			// The card's deck is a subdeck when Anki is reviewing a parent deck, so match the hierarchy.
+			// The chosen deck is never overwritten with the card's deck.
+			const isMismatch = Boolean(chosenDeck && ankiDeck && !isDeckOrSubdeck(ankiDeck, chosenDeck));
 
 			await this.updateCounts(chosenDeck || ankiDeck);
 
-			if (!this.hasStarted) {
-				if (isMatch) {
-					this.hasStarted = true;
-					if (ankiDeck && this.config.deck !== ankiDeck) {
-						this.config.deck = ankiDeck;
-						this.onDeckChange?.(ankiDeck);
-					}
-					void this.renderCurrentCard();
-				} else {
-					this.renderStartScreenLive(currentCard, isMismatch ? chosenDeck : undefined);
-				}
+			if (isMismatch) {
+				this.hasStarted = false;
+				this.renderStartScreenLive(currentCard, chosenDeck);
+			} else if (!this.hasStarted && !chosenDeck) {
+				this.renderStartScreenLive(currentCard);
 			} else {
-				if (ankiDeck && this.config.deck !== ankiDeck) {
-					this.config.deck = ankiDeck;
-					this.onDeckChange?.(ankiDeck);
-				}
+				this.hasStarted = true;
 				void this.renderCurrentCard();
 			}
 		} catch (err: unknown) {
@@ -927,7 +931,7 @@ export class DeckPlayer {
 	private renderStartScreenLive(currentCard: AnkiCardInfo, chosenDeck?: string) {
 		this.container.empty();
 		const ankiDeck = currentCard.deckName || 'Current deck';
-		const hasMismatch = Boolean(chosenDeck && ankiDeck && chosenDeck.toLowerCase() !== ankiDeck.toLowerCase());
+		const hasMismatch = Boolean(chosenDeck && currentCard.deckName && !isDeckOrSubdeck(currentCard.deckName, chosenDeck));
 		this.renderHeader(chosenDeck || ankiDeck);
 
 		const startDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
@@ -967,10 +971,26 @@ export class DeckPlayer {
 
 			const actions = startDiv.createDiv({ cls: 'anki-mismatch-actions' });
 
-			const startAnkiBtn = actions.createEl('button', {
+			const openMineBtn = actions.createEl('button', {
 				cls: 'anki-embed-flip-btn anki-mismatch-btn',
-				text: `Start synced session with ${shortAnki}`,
-				attr: { title: `Sync with Anki desktop reviewing ${ankiDeck}` },
+				text: `Open ${shortChosen} in Anki`,
+				attr: { title: `Switch Anki desktop to ${chosenDeck} and sync` },
+			});
+			openMineBtn.onclick = async () => {
+				try {
+					await this.client.guiDeckReview(chosenDeck);
+					this.hasStarted = true;
+					void this.loadCards();
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					new Notice(`Could not open deck in Anki: ${msg}`);
+				}
+			};
+
+			const startAnkiBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary anki-mismatch-btn',
+				text: `Switch to ${shortAnki}`,
+				attr: { title: `Sync with the deck Anki desktop is reviewing (${ankiDeck})` },
 			});
 			startAnkiBtn.onclick = () => {
 				this.config.deck = ankiDeck;
@@ -981,7 +1001,7 @@ export class DeckPlayer {
 
 			const remoteBtn = actions.createEl('button', {
 				cls: 'anki-embed-btn-secondary anki-mismatch-btn',
-				text: `Review ${shortChosen} in remote deck mode`,
+				text: `Review ${shortChosen} offline`,
 				attr: { title: `Review ${chosenDeck} offline in Obsidian` },
 			});
 			remoteBtn.onclick = () => {
@@ -1035,11 +1055,11 @@ export class DeckPlayer {
 			pickerBtn.onclick = () => {
 				this.resetToDeckPicker();
 			};
-		}
 
-		const hint = startDiv.createDiv({ cls: 'anki-embed-shortcut-hint', attr: { style: 'margin-top: 16px;' } });
-		hint.createSpan({ text: 'Shortcut: Press Space to start' });
-		hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
+			const hint = startDiv.createDiv({ cls: 'anki-embed-shortcut-hint', attr: { style: 'margin-top: 16px;' } });
+			hint.createSpan({ text: 'Shortcut: Press Space to start' });
+			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
+		}
 	}
 
 	private startLiveSyncWatcher() {
@@ -1064,20 +1084,7 @@ export class DeckPlayer {
 						}
 						return;
 					}
-					const currentDeck = currentCard.deckName;
-					if (currentDeck && this.config.deck !== currentDeck) {
-						this.config.deck = currentDeck;
-						this.onDeckChange?.(currentDeck);
-						void this.updateCounts(currentDeck);
-					}
-					const existingCard = this.cards[this.currentIndex];
-					if (!existingCard || existingCard.cardId !== currentCard.cardId) {
-						this.cards = [currentCard];
-						this.currentIndex = 0;
-						this.showingAnswer = false;
-						void this.updateCounts(currentDeck || this.config.deck);
-						await this.renderCurrentCard();
-					}
+					await this.applyPolledLiveCard(currentCard);
 				} catch {
 					// Ignore
 				} finally {
@@ -1094,19 +1101,7 @@ export class DeckPlayer {
 				try {
 					const currentCard = await this.client.guiCurrentCard();
 					if (currentCard) {
-						const currentDeck = currentCard.deckName;
-						if (currentDeck && this.config.deck !== currentDeck) {
-							this.config.deck = currentDeck;
-							this.onDeckChange?.(currentDeck);
-							void this.updateCounts(currentDeck);
-						}
-						if (currentCard.cardId !== this.cards[this.currentIndex]?.cardId) {
-							this.cards = [currentCard];
-							this.currentIndex = 0;
-							this.showingAnswer = false;
-							void this.updateCounts(currentDeck || this.config.deck);
-							await this.renderCurrentCard();
-						}
+						await this.applyPolledLiveCard(currentCard);
 					}
 				} catch {
 					// Ignore
@@ -1116,6 +1111,214 @@ export class DeckPlayer {
 			})();
 		};
 		window.addEventListener('focus', this.onWindowFocusHandler);
+	}
+
+	/** Mirror a card polled from Anki desktop, pausing if Anki has moved outside the chosen deck. */
+	private async applyPolledLiveCard(currentCard: AnkiCardInfo): Promise<void> {
+		const chosenDeck = this.config.deck;
+		if (chosenDeck && currentCard.deckName && !isDeckOrSubdeck(currentCard.deckName, chosenDeck)) {
+			this.cards = [currentCard];
+			this.currentIndex = 0;
+			this.showingAnswer = false;
+			this.hasStarted = false;
+			this.renderStartScreenLive(currentCard, chosenDeck);
+			return;
+		}
+		if (currentCard.cardId !== this.cards[this.currentIndex]?.cardId) {
+			this.cards = [currentCard];
+			this.currentIndex = 0;
+			this.showingAnswer = false;
+			void this.updateCounts(chosenDeck || currentCard.deckName);
+			await this.renderCurrentCard();
+		}
+	}
+
+	/**
+	 * The deck Anki desktop has open, whether it is reviewing or on the deck's overview screen.
+	 * Falls back to the deck of the card being reviewed. Null if Anki can't be reached.
+	 */
+	/** Make Anki desktop start reviewing the deck. Returns false (after a notice) on failure. */
+	private async reviewDeckInAnki(deck: string): Promise<boolean> {
+		try {
+			await this.client.guiDeckReview(deck);
+			return true;
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Could not open deck in Anki: ${msg}`);
+			return false;
+		}
+	}
+
+	private async getAnkiOpenDeck(): Promise<string | null> {
+		try {
+			const deck = await this.client.getCurrentDeckName();
+			if (deck) return deck;
+		} catch {
+			// Fall through to the card being reviewed
+		}
+		const card = await this.client.guiCurrentCard().catch(() => null);
+		return card?.deckName ?? null;
+	}
+
+	/**
+	 * Start the deck chosen in the deck picker. Goes live when Anki desktop is already reviewing it;
+	 * when Anki is reviewing a different deck, asks how to resolve the conflict.
+	 */
+	private async startDeckFromPicker(deck: string): Promise<void> {
+		const begin = (live: boolean, deckToLoad: string = deck) => {
+			this.config.deck = deckToLoad;
+			this.config.select = false;
+			this.config.live = live;
+			this.hasStarted = live;
+			this.onDeckChange?.(deckToLoad);
+			void this.loadCards();
+		};
+
+		const ankiDeck = await this.getAnkiOpenDeck();
+
+		if (!ankiDeck) {
+			// Anki isn't reachable or its open deck can't be determined: keep the current mode.
+			begin(this.isLiveSync);
+			return;
+		}
+		if (isSameDeck(ankiDeck, deck)) {
+			begin(true);
+			return;
+		}
+
+		this.confirmLiveDeckSwitch(deck, ankiDeck, {
+			title: 'Anki is reviewing a different deck',
+			description: 'You picked a different deck from the one open in Anki desktop. Live sync can only mirror one deck.',
+			myDeckLabel: 'Selected deck:',
+			onLive: () => begin(true, ankiDeck),
+			onLiveMine: async () => {
+				if (await this.reviewDeckInAnki(deck)) begin(true);
+			},
+			onOffline: () => begin(false),
+		});
+	}
+
+	/**
+	 * Turn on live sync from an offline session. If Anki desktop is reviewing a deck outside the
+	 * current one, ask before switching decks.
+	 */
+	private async switchToLiveMode(targetDeck?: string): Promise<void> {
+		const myDeck = targetDeck ?? this.config.deck;
+
+		const goLive = (deck: string | undefined = myDeck) => {
+			if (deck && deck !== this.config.deck) {
+				this.config.deck = deck;
+				this.onDeckChange?.(deck);
+			}
+			this.config.live = true;
+			this.config.select = false;
+			this.hasStarted = true;
+			void this.loadCards();
+		};
+
+		const ankiDeck = await this.getAnkiOpenDeck();
+		if (!myDeck || !ankiDeck || isSameDeck(ankiDeck, myDeck)) {
+			// Anki's deck is unknown (loadLiveCards opens ours or shows a connection error),
+			// or Anki already has our deck open.
+			goLive();
+			return;
+		}
+
+		this.confirmLiveDeckSwitch(myDeck, ankiDeck, {
+			onLive: () => goLive(ankiDeck),
+			onLiveMine: async () => {
+				if (await this.reviewDeckInAnki(myDeck)) goLive();
+			},
+			// Already reviewing offline: keep the current session as it is.
+			onOffline: () => {},
+		});
+	}
+
+	private confirmLiveDeckSwitch(
+		myDeck: string,
+		ankiDeck: string,
+		handlers: {
+			onLive: () => void;
+			onLiveMine: () => void | Promise<void>;
+			onOffline: () => void;
+			title?: string;
+			description?: string;
+			myDeckLabel?: string;
+		},
+	): void {
+		this.container.querySelector('.anki-mode-select-overlay')?.remove();
+
+		const overlay = this.container.createDiv({ cls: 'anki-mode-select-overlay' });
+		const modal = overlay.createDiv({ cls: 'anki-mode-select-modal' });
+
+		const close = () => {
+			document.removeEventListener('keydown', onEscKey);
+			overlay.remove();
+		};
+		const onEscKey = (evt: KeyboardEvent) => {
+			if (evt.key === 'Escape') {
+				evt.preventDefault();
+				evt.stopPropagation();
+				close();
+			}
+		};
+		document.addEventListener('keydown', onEscKey);
+		overlay.onclick = (e) => {
+			if (e.target === overlay) close();
+		};
+
+		const shortMine = myDeck.split('::').pop() ?? myDeck;
+		const shortAnki = ankiDeck.split('::').pop() ?? ankiDeck;
+
+		const header = modal.createDiv({ cls: 'anki-mode-warning-header' });
+		header.createSpan({ text: '⚠️' });
+		header.createSpan({ text: handlers.title ?? 'Anki is reviewing a different deck' });
+
+		modal.createEl('p', {
+			cls: 'anki-mode-select-desc',
+			text: handlers.description ?? 'Live sync mirrors the deck Anki desktop is reviewing. Turning it on now will switch decks.',
+		});
+
+		const box = modal.createDiv({ cls: 'anki-mode-warning-box' });
+		const row1 = box.createDiv({ cls: 'anki-mode-warning-row' });
+		row1.createSpan({ cls: 'anki-mode-warning-label', text: handlers.myDeckLabel ?? 'Reviewing here:' });
+		row1.createSpan({ cls: 'anki-mode-warning-value', text: myDeck });
+		const row2 = box.createDiv({ cls: 'anki-mode-warning-row' });
+		row2.createSpan({ cls: 'anki-mode-warning-label', text: 'Anki app deck:' });
+		row2.createSpan({ cls: 'anki-mode-warning-value', text: ankiDeck });
+
+		const actions = modal.createDiv({ cls: 'anki-mode-select-actions' });
+
+		const liveBtn = actions.createEl('button', {
+			cls: 'mod-cta',
+			text: `Live: ${shortAnki}`,
+			attr: { title: `Live sync with ${ankiDeck}, the deck open in Anki desktop` },
+		});
+		liveBtn.onclick = () => {
+			close();
+			handlers.onLive();
+		};
+
+		const liveMineBtn = actions.createEl('button', {
+			text: `Live: ${shortMine} (switch Anki)`,
+			attr: { title: `Switch Anki desktop to ${myDeck} and live sync with it` },
+		});
+		liveMineBtn.onclick = () => {
+			close();
+			void handlers.onLiveMine();
+		};
+
+		const offlineBtn = actions.createEl('button', {
+			text: `Offline: ${shortMine}`,
+			attr: { title: `Review ${myDeck} in Obsidian without touching Anki desktop` },
+		});
+		offlineBtn.onclick = () => {
+			close();
+			handlers.onOffline();
+		};
+
+		const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+		cancelBtn.onclick = () => close();
 	}
 
 	public stopLiveSyncWatcher() {
@@ -1255,6 +1458,50 @@ export class DeckPlayer {
 		this.isTimerPaused = false;
 		this.timerPausedElapsedMs = 0;
 		this.stopGamepadLoop();
+		this.stopWatchingVault();
+	}
+
+	/**
+	 * Linked notes are cached per card. Drop that cache whenever a note's properties change or a
+	 * note is deleted, so the links button and dropdown pick up newly tagged or linked notes.
+	 */
+	private watchVaultForLinkChanges(): void {
+		if (!this.app || this.vaultEventRefs.length > 0) return;
+		const onChange = () => this.scheduleLinkedNotesRefresh();
+		this.vaultEventRefs.push(
+			this.app.metadataCache.on('changed', onChange),
+			this.app.metadataCache.on('deleted', onChange),
+		);
+	}
+
+	private stopWatchingVault(): void {
+		if (this.app) {
+			for (const ref of this.vaultEventRefs) this.app.metadataCache.offref(ref);
+		}
+		this.vaultEventRefs = [];
+		if (this.linksRefreshTimer !== null) {
+			window.clearTimeout(this.linksRefreshTimer);
+			this.linksRefreshTimer = null;
+		}
+	}
+
+	private scheduleLinkedNotesRefresh(): void {
+		// Embedded players are never destroyed explicitly: stop listening once removed from the page.
+		if (!this.container.isConnected) {
+			this.stopWatchingVault();
+			return;
+		}
+		if (this.linksRefreshTimer !== null) window.clearTimeout(this.linksRefreshTimer);
+		this.linksRefreshTimer = window.setTimeout(() => {
+			this.linksRefreshTimer = null;
+			this.linkedNotesCache.clear();
+			const card = this.cards[this.currentIndex];
+			if (!card) return;
+			void this.scanVaultForCard(card.cardId).then(() => {
+				this.updateLinksButton();
+				this.refreshActiveLinksDropdown?.();
+			});
+		}, 300);
 	}
 
 	public resetToDeckPicker(): void {
@@ -1396,10 +1643,9 @@ export class DeckPlayer {
 		if (this.cards.length === 0) return;
 
 		if (!this.hasStarted) {
-			if (this.isLiveSync && this.cards[0]?.deckName && this.config.deck !== this.cards[0].deckName) {
-				this.config.deck = this.cards[0].deckName;
-				this.onDeckChange?.(this.cards[0].deckName);
-			}
+			// On the "different deck" screen the user must pick an option explicitly.
+			const liveDeck = this.cards[0]?.deckName;
+			if (this.isLiveSync && this.config.deck && liveDeck && !isDeckOrSubdeck(liveDeck, this.config.deck)) return;
 			this.hasStarted = true;
 			void this.renderCurrentCard();
 			return;
@@ -1561,10 +1807,6 @@ export class DeckPlayer {
 				new Notice('Undid last review in Anki');
 				const nextCard = await this.client.guiUndoAndCurrentCard();
 				if (nextCard) {
-					if (nextCard.deckName && this.config.deck !== nextCard.deckName) {
-						this.config.deck = nextCard.deckName;
-						this.onDeckChange?.(nextCard.deckName);
-					}
 					this.cards = [nextCard];
 					this.currentIndex = 0;
 					this.showingAnswer = false;
@@ -2015,25 +2257,7 @@ export class DeckPlayer {
 
 			startBtn.onclick = () => {
 				if (selectedDeck) {
-					const deckToLoad = selectedDeck;
-					this.config.deck = deckToLoad;
-					this.config.select = false;
-					this.hasStarted = false;
-					this.onDeckChange?.(deckToLoad);
-
-					void (async () => {
-						if (!this.config.live) {
-							try {
-								const currentCard = await this.client.guiCurrentCard().catch(() => null);
-								if (currentCard?.deckName && currentCard.deckName.toLowerCase() === deckToLoad.toLowerCase()) {
-									this.config.live = true;
-								}
-							} catch {
-								// Ignore
-							}
-						}
-						void this.loadCards();
-					})();
+					void this.startDeckFromPicker(selectedDeck);
 				}
 			};
 
@@ -2343,86 +2567,18 @@ export class DeckPlayer {
 
 			liveCard.onclick = async () => {
 				liveCard.addClass('is-loading');
-				liveDesc.setText('Checking active deck in Anki...');
+				liveDesc.setText('Checking Anki desktop...');
 
 				try {
-					let currentCard = await this.client.guiCurrentCard();
-					if (!currentCard) {
-						try {
-							await this.client.guiDeckReview(selectedDeck);
-							currentCard = await this.client.guiCurrentCard();
-						} catch {
-							// Ignore
-						}
-					}
-
-					const ankiDeck = currentCard?.deckName;
-
-					if (ankiDeck && ankiDeck !== selectedDeck) {
-						renderWarningScreen(ankiDeck);
-					} else {
-						closeOverlay();
-						this.config.live = true;
-						this.config.deck = ankiDeck || selectedDeck;
-						this.config.select = false;
-						this.hasStarted = true;
-						this.onDeckChange?.(this.config.deck);
-						void this.loadCards();
-					}
+					await this.client.guiCurrentCard();
 				} catch (err: unknown) {
 					liveCard.removeClass('is-loading');
 					const msg = err instanceof Error ? err.message : String(err);
 					renderErrorScreen(msg);
+					return;
 				}
-			};
-		};
-
-		const renderWarningScreen = (ankiDeck: string) => {
-			modal.empty();
-
-			const header = modal.createDiv({ cls: 'anki-mode-warning-header' });
-			header.createSpan({ text: '⚠️' });
-			header.createSpan({ text: 'Different deck open in Anki app' });
-
-			modal.createEl('p', {
-				cls: 'anki-mode-select-desc',
-				text: 'The Anki desktop app currently has a different deck open than the one you selected in the deck picker.',
-			});
-
-			const box = modal.createDiv({ cls: 'anki-mode-warning-box' });
-
-			const row1 = box.createDiv({ cls: 'anki-mode-warning-row' });
-			row1.createSpan({ cls: 'anki-mode-warning-label', text: 'Selected deck:' });
-			row1.createSpan({ cls: 'anki-mode-warning-value', text: selectedDeck });
-
-			const row2 = box.createDiv({ cls: 'anki-mode-warning-row' });
-			row2.createSpan({ cls: 'anki-mode-warning-label', text: 'Anki app deck:' });
-			row2.createSpan({ cls: 'anki-mode-warning-value', text: ankiDeck });
-
-			modal.createEl('p', {
-				cls: 'anki-mode-select-desc',
-				text: `Do you want to proceed with the deck open in the Anki app (${ankiDeck})?`,
-			});
-
-			const actions = modal.createDiv({ cls: 'anki-mode-select-actions' });
-			const cancelBtn = actions.createEl('button', { text: 'Cancel' });
-			cancelBtn.onclick = () => {
 				closeOverlay();
-			};
-
-			const proceedBtn = actions.createEl('button', {
-				cls: 'mod-cta',
-				text: `Proceed with ${ankiDeck.split('::').pop() ?? ankiDeck}`,
-				attr: { title: `Proceed with ${ankiDeck}` },
-			});
-			proceedBtn.onclick = () => {
-				closeOverlay();
-				this.config.live = true;
-				this.config.deck = ankiDeck;
-				this.config.select = false;
-				this.hasStarted = true;
-				this.onDeckChange?.(ankiDeck);
-				void this.loadCards();
+				await this.switchToLiveMode(selectedDeck);
 			};
 		};
 
@@ -2686,9 +2842,7 @@ export class DeckPlayer {
 					attr: { title: 'Offline mode (click to switch to live sync with Anki desktop)' },
 				});
 				counterBadge.onclick = () => {
-					this.config.live = true;
-					this.hasStarted = true;
-					void this.loadCards();
+					void this.switchToLiveMode();
 				};
 
 				const modePill = titleContainer.createSpan({
@@ -3773,6 +3927,29 @@ ${normalizedCss}
 		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
 		const prevTimeStreak = this.timeStreak;
 
+		// Offline learn mode records the answer in Anki. Save it before moving on, so a failed
+		// save leaves the card on screen (nothing counted) instead of silently skipping it.
+		const answeredCard = this.cards[this.currentIndex];
+		let cardAfterAnswer: AnkiCardInfo | undefined;
+		if (!this.isLiveSync && this.isLearningMode && answeredCard) {
+			if (this.isSavingAnswer) return;
+			this.isSavingAnswer = true;
+			try {
+				const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;
+				await this.client.answerCard(answeredCard.cardId, ease, timeParam);
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`Couldn't save your answer to Anki, so this card wasn't graded. Make sure Anki is open, then try again. (${msg})`, 8000);
+				return;
+			} finally {
+				this.isSavingAnswer = false;
+			}
+			cardAfterAnswer = (await this.client.getCardsInfo([answeredCard.cardId]).catch(() => []))[0];
+		} else if (!this.isLiveSync && !this.isLearningMode && !this.hasShownBrowseNotice) {
+			this.hasShownBrowseNotice = true;
+			new Notice("Browse mode doesn't save answers to Anki. Switch to learn mode to record reviews.");
+		}
+
 		if (timeTaken !== undefined) {
 			const timeTakenSec = timeTaken / 1000;
 			if (!this.timerExceededForCurrentCard && timeTakenSec <= limitSec) {
@@ -3811,10 +3988,6 @@ ${normalizedCss}
 				const nextCard = await this.client.guiAnswerAndCurrentCard(ease);
 				this.showingAnswer = false;
 				if (nextCard) {
-					if (nextCard.deckName && this.config.deck !== nextCard.deckName) {
-						this.config.deck = nextCard.deckName;
-						this.onDeckChange?.(nextCard.deckName);
-					}
 					this.cards = [nextCard];
 					this.currentIndex = 0;
 					await this.renderCurrentCard();
@@ -3839,28 +4012,11 @@ ${normalizedCss}
 			return;
 		}
 
-		if (card) {
-			const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;
-			if (this.isLearningMode && !this.isLiveSync) {
-				try {
-					await this.client.answerCard(card.cardId, ease, timeParam);
-					const updatedList = await this.client.getCardsInfo([card.cardId]);
-					const updated = updatedList[0];
-					if (updated && (updated.queue === 1 || updated.queue === 3)) {
-						// Re-insert into queue with automatic no-waiting buffer
-						const remaining = this.cards.length - (this.currentIndex + 1);
-						const offset = Math.min(3, remaining);
-						const insertIdx = this.currentIndex + 1 + offset;
-						this.cards.splice(insertIdx, 0, updated);
-					}
-				} catch (err: unknown) {
-					console.warn('Failed to record learning answer in Anki:', err);
-				}
-			} else {
-				void this.client.answerCard(card.cardId, ease, timeParam).catch((err) => {
-					console.warn('Failed to record card answer in Anki:', err);
-				});
-			}
+		// A card still in learning comes back a few cards later in this session.
+		if (cardAfterAnswer && (cardAfterAnswer.queue === 1 || cardAfterAnswer.queue === 3)) {
+			const remaining = this.cards.length - (this.currentIndex + 1);
+			const insertIdx = this.currentIndex + 1 + Math.min(3, remaining);
+			this.cards.splice(insertIdx, 0, cardAfterAnswer);
 		}
 
 		this.currentIndex++;
@@ -3965,9 +4121,7 @@ ${normalizedCss}
 					attr: { title: 'Remote deck mode (click to switch to live sync with Anki desktop)' },
 				});
 				remoteBadge.onclick = () => {
-					this.config.live = true;
-					this.hasStarted = true;
-					void this.loadCards();
+					void this.switchToLiveMode();
 				};
 
 				const modeBtn = navPill.createEl('button', {
@@ -4261,9 +4415,13 @@ ${normalizedCss}
 			item.setTitle(this.isLiveSync ? 'Switch to offline mode' : 'Switch to live sync mode')
 				.setIcon(this.isLiveSync ? 'zap-off' : 'zap')
 				.onClick(() => {
-					this.config.live = !this.isLiveSync;
-					this.hasStarted = true;
-					void this.loadCards();
+					if (this.isLiveSync) {
+						this.config.live = false;
+						this.hasStarted = true;
+						void this.loadCards();
+					} else {
+						void this.switchToLiveMode();
+					}
 				});
 		});
 
@@ -4385,6 +4543,9 @@ ${normalizedCss}
 	}
 
 	public getCardTagsSync(cardId: number, card?: AnkiCardInfo): string[] {
+		if (this.realTagsLoaded.has(cardId)) {
+			return this.cardTagsCache.get(cardId) ?? [];
+		}
 		const c = card || this.cards.find((item) => item.cardId === cardId);
 		if (!c) {
 			return this.cardTagsCache.get(cardId) ?? [];
@@ -4396,25 +4557,30 @@ ${normalizedCss}
 		return tags;
 	}
 
+	/**
+	 * Load the card's real tags from Anki. Until then, tags are scraped from the card's HTML, which
+	 * only works for note types that print their tags and can cut tags short.
+	 */
 	public async ensureCardTagsLoaded(cardId: number, card?: AnkiCardInfo): Promise<string[]> {
+		if (this.realTagsLoaded.has(cardId)) {
+			return this.cardTagsCache.get(cardId) ?? [];
+		}
 		const syncTags = this.getCardTagsSync(cardId, card);
-		if (syncTags.length > 0) return syncTags;
 
 		try {
-			const res = await this.client.getCardsInfo([cardId]);
-			if (res && res[0]?.tags && Array.isArray(res[0].tags)) {
-				const fetched = res[0].tags.map((t) => normalizeAnkiTag(t)).filter(Boolean);
-				if (fetched.length > 0) {
-					this.cardTagsCache.set(cardId, fetched);
-					const currentCard = this.cards.find((c) => c.cardId === cardId);
-					if (currentCard) {
-						currentCard.tags = res[0].tags;
-					}
-					return fetched;
+			const rawTags = await this.client.getCardTags(cardId);
+			if (rawTags) {
+				const fetched = rawTags.map((t) => normalizeAnkiTag(t)).filter(Boolean);
+				this.cardTagsCache.set(cardId, fetched);
+				this.realTagsLoaded.add(cardId);
+				const currentCard = this.cards.find((c) => c.cardId === cardId);
+				if (currentCard) {
+					currentCard.tags = rawTags;
 				}
+				return fetched;
 			}
 		} catch {
-			// Ignore network or connection error
+			// Anki unreachable: keep the scraped tags
 		}
 		return syncTags;
 	}
@@ -4516,9 +4682,13 @@ ${normalizedCss}
 			item.setTitle(this.isLiveSync ? 'Switch to offline mode' : 'Switch to live sync mode')
 				.setIcon(this.isLiveSync ? 'zap-off' : 'zap')
 				.onClick(() => {
-					this.config.live = !this.isLiveSync;
-					this.hasStarted = true;
-					void this.loadCards();
+					if (this.isLiveSync) {
+						this.config.live = false;
+						this.hasStarted = true;
+						void this.loadCards();
+					} else {
+						void this.switchToLiveMode();
+					}
 				});
 		});
 
@@ -5290,6 +5460,7 @@ ${tagsSection}`;
 	}
 
 	public closeActiveLinksDropdown = (): void => {
+		this.refreshActiveLinksDropdown = null;
 		if (this.activeLinksDropdown) {
 			this.activeLinksDropdown.remove();
 			this.activeLinksDropdown = null;
@@ -5780,6 +5951,9 @@ ${tagsSection}`;
 		};
 
 		renderDropdownContent();
+		this.refreshActiveLinksDropdown = () => {
+			if (this.activeLinksDropdown === dropdown) renderDropdownContent();
+		};
 
 		// Trigger vault scan if not done yet to populate backlinks
 		void this.scanVaultForCard(activeCard.cardId).then(() => {

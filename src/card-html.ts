@@ -25,8 +25,20 @@ export function normalizeAnkiCss(css: string): string {
 
 export function isDeckOrSubdeck(cardDeck: string | undefined, targetDeck: string | undefined): boolean {
 	if (!cardDeck || !targetDeck) return false;
-	if (cardDeck === targetDeck) return true;
-	return cardDeck.startsWith(`${targetDeck}::`);
+	// Anki deck names are case-insensitive, and reviewing a parent deck shows cards from its subdecks.
+	const card = cardDeck.toLowerCase();
+	const target = targetDeck.toLowerCase();
+	return card === target || card.startsWith(`${target}::`);
+}
+
+/** Anki deck names are case-insensitive. */
+export function isSameDeck(a: string | undefined, b: string | undefined): boolean {
+	return Boolean(a && b && a.toLowerCase() === b.toLowerCase());
+}
+
+/** A `deck:"..."` search term, escaping characters Anki's search treats specially. */
+export function deckSearchTerm(deck: string): string {
+	return `deck:"${deck.replace(/[\\"*_]/g, '\\$&')}"`;
 }
 
 export function isClozeCard(card?: { modelName?: string; question?: string; answer?: string }): boolean {

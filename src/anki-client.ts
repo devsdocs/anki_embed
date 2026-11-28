@@ -1,4 +1,5 @@
 import { requestUrl } from 'obsidian';
+import { deckSearchTerm } from './card-html';
 import {
 	AnkiAnswerParam,
 	AnkiCardInfo,
@@ -140,6 +141,44 @@ export class AnkiClient {
 		return await this.request<number[]>('findCards', { query });
 	}
 
+	/**
+	 * The deck Anki desktop currently has open: the one its overview ("Study Now") screen and
+	 * reviewer use. AnkiConnect has no action for this, so it is derived from Anki's
+	 * `deck:current` search, which matches the open deck and its subdecks. Returns null when it
+	 * can't be determined (for example when that deck has no cards).
+	 */
+	public async getCurrentDeckName(): Promise<string | null> {
+		const ids = await this.findCards('deck:current');
+		const firstId = ids[0];
+		if (firstId === undefined) return null;
+		const [info] = await this.getCardsInfo([firstId]);
+		const cardDeck = info?.deckName;
+		if (!cardDeck) return null;
+
+		// The open deck is this card's deck or one of its parents: the deepest one that
+		// still contains every card in deck:current.
+		const parts = cardDeck.split('::');
+		let current: string | null = null;
+		for (let i = 1; i <= parts.length; i++) {
+			const candidate = parts.slice(0, i).join('::');
+			const outside = await this.findCards(`deck:current -${deckSearchTerm(candidate)}`);
+			if (outside.length > 0) break;
+			current = candidate;
+		}
+		return current;
+	}
+
+	/**
+	 * A card's tags. Tags belong to the card's note, and AnkiConnect's cardsInfo doesn't include
+	 * them, so this looks up the note. Null if the card doesn't exist.
+	 */
+	public async getCardTags(cardId: number): Promise<string[] | null> {
+		const [info] = await this.getCardsInfo([cardId]);
+		if (!info?.note) return null;
+		const [note] = await this.getNotesInfo([info.note]);
+		return note?.tags ?? null;
+	}
+
 	public async getCardsInfo(cards: number[]): Promise<AnkiCardInfo[]> {
 		if (cards.length === 0) return [];
 		return await this.request<AnkiCardInfo[]>('cardsInfo', { cards });
@@ -149,12 +188,15 @@ export class AnkiClient {
 		return await this.request<boolean[]>('answerCards', { answers });
 	}
 
-	public async answerCard(cardId: number, ease: 1 | 2 | 3 | 4, time?: number): Promise<boolean> {
-		try {
-			const res = await this.answerCards([{ cardId, ease, time }]);
-			return Array.isArray(res) ? (res[0] ?? true) : true;
-		} catch {
-			return await this.guiAnswerCard(ease);
+	/**
+	 * Record an answer for this card in Anki's scheduler. Throws if Anki didn't record it. There is
+	 * deliberately no fallback to guiAnswerCard: that grades whatever card Anki's reviewer is
+	 * showing, which may be a different card.
+	 */
+	public async answerCard(cardId: number, ease: 1 | 2 | 3 | 4, time?: number): Promise<void> {
+		const res = await this.answerCards([{ cardId, ease, time }]);
+		if (!Array.isArray(res) || res[0] !== true) {
+			throw new Error(`Anki didn't record the answer for card ${cardId}`);
 		}
 	}
 

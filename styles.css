@@ -3127,6 +3127,7 @@ body:has(.anki-embed-container.is-anki-fullscreen) .suggestion-container {
 	display: flex;
 	justify-content: flex-end;
 	gap: 8px;
+	flex-wrap: wrap;
 	margin-top: 6px;
 }
 

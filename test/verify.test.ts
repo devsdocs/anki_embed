@@ -24,6 +24,8 @@ import {
 	renderClozeDeletion,
 	sortCardsForLearningMode,
 	isDeckOrSubdeck,
+	isSameDeck,
+	deckSearchTerm,
 } from '../src/card-html';
 import { AnkiCardInfo, ANKI_FLAG_CONFIGS, DEFAULT_SETTINGS, VIEW_TYPE_ANKI_EMBED } from '../src/types';
 import { linkTagToNote, syncNoteLinksWithSettings } from '../src/link-service';
@@ -518,6 +520,34 @@ void (async () => {
 	assert.strictEqual(buildAnkiTagQuery(''), '');
 })();
 
+// 11b. answerCard records through answerCards only, and never falls back to grading the GUI reviewer's card
+void (async () => {
+	const makeClient = (respond: (action: string) => unknown) => {
+		const c = new AnkiClient();
+		const calls: string[] = [];
+		c.request = (async (action: string) => {
+			calls.push(action);
+			return respond(action);
+		}) as AnkiClient['request'];
+		return { c, calls };
+	};
+
+	const ok = makeClient(() => [true]);
+	await ok.c.answerCard(42, 3);
+	assert.deepStrictEqual(ok.calls, ['answerCards']);
+
+	const notRecorded = makeClient(() => [false]);
+	await assert.rejects(notRecorded.c.answerCard(42, 3), /didn't record/);
+	assert.deepStrictEqual(notRecorded.calls, ['answerCards'], 'No guiAnswerCard fallback when Anki rejects the card');
+
+	const unreachable = makeClient(() => { throw new Error('ECONNREFUSED'); });
+	await assert.rejects(unreachable.c.answerCard(42, 3), /ECONNREFUSED/);
+	assert.deepStrictEqual(unreachable.calls, ['answerCards'], 'No guiAnswerCard fallback when Anki is unreachable');
+})().catch((err: unknown) => {
+	console.error(err);
+	process.exit(1);
+});
+
 // 12. linkTagToNote frontmatter plural property & migration tests
 void (async () => {
 	const mockFile = { path: 'Notes/Heart.md', basename: 'Heart' } as unknown as import('obsidian').TFile;
@@ -665,6 +695,16 @@ learning_order: due-new-future
 	assert.strictEqual(isDeckOrSubdeck('AnKing Step 10', 'AnKing Step 1'), false);
 	assert.strictEqual(isDeckOrSubdeck(undefined, 'AnKing Step 1'), false);
 	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1', undefined), false);
+	// Anki deck names are case-insensitive
+	assert.strictEqual(isDeckOrSubdeck('anking step 1::Cardio', 'AnKing Step 1'), true);
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1', 'anking step 1'), true);
+	// A parent deck is not inside its own subdeck
+	assert.strictEqual(isDeckOrSubdeck('AnKing Step 1', 'AnKing Step 1::Path'), false);
+	assert.strictEqual(isSameDeck('AnKing Step 1', 'anking step 1'), true);
+	assert.strictEqual(isSameDeck('AnKing Step 1::Path', 'AnKing Step 1'), false);
+	assert.strictEqual(isSameDeck(undefined, 'AnKing Step 1'), false);
+	assert.strictEqual(deckSearchTerm('AnKing::Path/Pharm'), 'deck:"AnKing::Path/Pharm"');
+	assert.strictEqual(deckSearchTerm('My_Deck "*" \\'), 'deck:"My\\_Deck \\"\\*\\" \\\\"');
 
 	// Verify fullscreen exit button and styles
 	assert.ok(cssContent.includes('.anki-embed-btn-icon.anki-embed-fs-btn.is-active'), 'Has fullscreen exit button style');
@@ -679,8 +719,12 @@ learning_order: due-new-future
 	assert.ok(cssContent.includes('.anki-links-meta-row'), 'Has links meta row style');
 	assert.ok(deckPlayerContent.includes('anki-links-meta-row'), 'Uses metaRow in deck player');
 	assert.ok(deckPlayerContent.includes('promptDeckReviewMode'), 'Has promptDeckReviewMode method');
-	assert.ok(deckPlayerContent.includes('Different deck open in Anki app'), 'Has warning screen header');
-	assert.ok(deckPlayerContent.includes('Do you want to proceed with the deck open in the Anki app'), 'Has warning prompt message');
+	assert.ok(deckPlayerContent.includes('Anki is reviewing a different deck'), 'Has deck switch warning header');
+	assert.ok(deckPlayerContent.includes('Turning it on now will switch decks.'), 'Warns that going live switches decks');
+	assert.ok(deckPlayerContent.includes('await this.switchToLiveMode(selectedDeck);'), 'Mode select live option uses switchToLiveMode');
+	assert.ok(deckPlayerContent.includes('void this.startDeckFromPicker(selectedDeck);'), 'Deck picker start checks for a conflict with the live Anki deck');
+	assert.ok(deckPlayerContent.includes('onOffline: () => begin(false),'), 'Deck picker conflict offers offline review');
+	assert.ok(!/(counterBadge|remoteBadge)\.onclick = \(\) => \{\s*this\.config\.live = true;/.test(deckPlayerContent), 'Offline-to-live badges go through the deck switch check');
 	assert.ok(deckPlayerContent.includes('this.config.live = false;'), 'Sets remote mode on remote select');
 	assert.ok(deckPlayerContent.includes('this.config.live = true;'), 'Sets live sync mode on live select');
 
@@ -691,9 +735,10 @@ learning_order: due-new-future
 	assert.ok(deckPlayerContent.includes('rollupDeckNodeCounts'), 'Has subdeck node counts rollup');
 	assert.ok(deckPlayerContent.includes('nodeCountsMap'), 'Uses node counts map for deck tree nodes');
 	assert.ok(deckPlayerContent.includes('Anki desktop has a different deck open'), 'Has start screen deck mismatch title');
-	assert.ok(deckPlayerContent.includes('Start synced session with'), 'Has start synced session with Anki deck button');
-	assert.ok(deckPlayerContent.includes('in remote deck mode'), 'Has review in remote deck mode button');
-	assert.ok(deckPlayerContent.includes('renderStartScreenLive(currentCard, isMismatch ? chosenDeck : undefined)'), 'Calls start screen with mismatch deck');
+	assert.ok(deckPlayerContent.includes('text: `Switch to ${shortAnki}`'), 'Has switch to Anki deck button');
+	assert.ok(deckPlayerContent.includes('text: `Open ${shortChosen} in Anki`'), 'Has open chosen deck in Anki button');
+	assert.ok(deckPlayerContent.includes('text: `Review ${shortChosen} offline`'), 'Has review offline button');
+	assert.ok(deckPlayerContent.includes('renderStartScreenLive(currentCard, chosenDeck)'), 'Calls start screen with mismatch deck');
 
 	// Verify command palette and fullscreen toast notice support
 	assert.ok(cssContent.includes('.anki-fs-toast'), 'Has fullscreen toast notification style');
@@ -710,8 +755,17 @@ learning_order: due-new-future
 	assert.ok(deckPlayerContent.includes("cls: 'anki-fs-nav-btn anki-fs-nav-decks',\n\t\t\ttext: 'Decks'"), 'Fullscreen top notch decks button uses Decks text');
 
 	// Verify live sync auto-start on match and equal-width start screen buttons
-	assert.ok(deckPlayerContent.includes('const isMatch = Boolean(chosenDeck && ankiDeck && chosenDeck.toLowerCase() === ankiDeck.toLowerCase());'), 'Checks for matching open Anki deck');
-	assert.ok(deckPlayerContent.includes('if (isMatch) {\n\t\t\t\t\tthis.hasStarted = true;'), 'Automatically starts live sync when selected deck matches active Anki deck');
+	assert.ok(deckPlayerContent.includes('const isMismatch = Boolean(chosenDeck && ankiDeck && !isDeckOrSubdeck(ankiDeck, chosenDeck));'), 'Treats subdecks of the chosen deck as a match');
+	assert.ok(!deckPlayerContent.includes('this.config.deck = currentDeck;'), 'Live polling never overwrites the chosen deck');
+	assert.ok(!deckPlayerContent.includes('this.config.deck = nextCard.deckName;'), 'Answering/undo never overwrites the chosen deck');
+	assert.ok(deckPlayerContent.includes("this.app.metadataCache.on('changed', onChange)"), 'Linked notes cache refreshes when note properties change');
+	assert.ok(deckPlayerContent.includes('this.linkedNotesCache.clear();\n\t\t\tconst card = this.cards[this.currentIndex];'), 'Note changes clear the linked notes cache');
+	assert.ok(deckPlayerContent.includes('await this.client.getCardTags(cardId)'), 'Real card tags are loaded from the note');
+	assert.ok(deckPlayerContent.includes("Couldn't save your answer to Anki, so this card wasn't graded."), 'Failed offline answers are reported');
+	assert.ok(deckPlayerContent.includes('if (this.isSavingAnswer) return;'), 'A second key press cannot grade a card twice while saving');
+	assert.ok(!/void this\.client\.answerCard\(/.test(deckPlayerContent), 'Browse mode no longer records answers in Anki');
+	const ankiClientContent = fs.readFileSync(path.join(__dirname, '../src/anki-client.ts'), 'utf8');
+	assert.ok(ankiClientContent.includes('await this.getNotesInfo([info.note])'), 'getCardTags reads tags from notesInfo');
 	assert.ok(cssContent.includes('.anki-start-actions,'), 'Has start screen actions container style');
 	assert.ok(cssContent.includes('.anki-start-btn,'), 'Has equal-width start button style');
 	assert.ok(deckPlayerContent.includes("cls: 'anki-start-actions'"), 'Wraps start buttons in anki-start-actions');
