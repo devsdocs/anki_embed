@@ -9,15 +9,18 @@ export class AnkiView extends ItemView {
 	private config: DeckEmbedConfig = { select: true };
 	private client: AnkiClient;
 	private getSettings: () => AnkiEmbedSettings;
+	private saveSettings?: (settings: AnkiEmbedSettings) => Promise<void>;
 
 	constructor(
 		leaf: WorkspaceLeaf,
 		client: AnkiClient,
-		getSettings: () => AnkiEmbedSettings
+		getSettings: () => AnkiEmbedSettings,
+		saveSettings?: (settings: AnkiEmbedSettings) => Promise<void>
 	) {
 		super(leaf);
 		this.client = client;
 		this.getSettings = getSettings;
+		this.saveSettings = saveSettings;
 		this.navigation = true;
 	}
 
@@ -26,10 +29,19 @@ export class AnkiView extends ItemView {
 	}
 
 	getDisplayText(): string {
+		if (this.config.card ?? this.config.cardId) {
+			return `Anki: Card ${this.config.card ?? this.config.cardId}`;
+		}
 		if (this.config.deck) {
 			return `Anki: ${this.config.deck}`;
 		}
 		if (this.config.query) {
+			const tagMatch = this.config.query.match(/tag:(?:"\*?|\*?)(.*?)\*?"?$/);
+			if (tagMatch?.[1]) {
+				const parts = tagMatch[1].split('*').filter(Boolean);
+				const leaf = parts[parts.length - 1] ?? tagMatch[1];
+				return `Anki: #${leaf.replace(/_/g, ' ')}`;
+			}
 			return `Anki: ${this.config.query}`;
 		}
 		return 'Anki review';
@@ -51,7 +63,15 @@ export class AnkiView extends ItemView {
 			this.resetView();
 		});
 
+		this.addAction('maximize', 'Toggle Anki fullscreen mode (f11)', () => {
+			this.player?.toggleAnkiFullscreen();
+		});
+
 		this.renderPlayer();
+	}
+
+	public toggleAnkiFullscreen(enable?: boolean): void {
+		this.player?.toggleAnkiFullscreen(enable);
 	}
 
 	public resetView(): void {
@@ -59,8 +79,13 @@ export class AnkiView extends ItemView {
 		this.player?.resetToDeckPicker();
 	}
 
+	public invalidateLinksCache(cardId?: number): void {
+		this.player?.invalidateLinksCache(cardId);
+	}
+
 	async onClose(): Promise<void> {
 		this.contentEl.empty();
+		this.player?.destroy();
 		this.player = null;
 	}
 
@@ -68,12 +93,18 @@ export class AnkiView extends ItemView {
 		if (state && typeof state === 'object') {
 			const s = state as Partial<DeckEmbedConfig>;
 			this.config = {
+				card: typeof s.card === 'number' ? s.card : undefined,
+				cardId: typeof s.cardId === 'number' ? s.cardId : undefined,
 				deck: typeof s.deck === 'string' ? s.deck : undefined,
 				query: typeof s.query === 'string' ? s.query : undefined,
 				limit: typeof s.limit === 'number' ? s.limit : undefined,
-				filter: s.filter === 'all' || s.filter === 'due' || s.filter === 'new' ? s.filter : undefined,
+				filter: s.filter,
 				randomize: typeof s.randomize === 'boolean' ? s.randomize : undefined,
 				select: typeof s.select === 'boolean' ? s.select : undefined,
+				excludeSuspended: typeof s.excludeSuspended === 'boolean' ? s.excludeSuspended : undefined,
+				order: s.order,
+				counts: typeof s.counts === 'boolean' ? s.counts : undefined,
+				live: typeof s.live === 'boolean' ? s.live : (s.card !== undefined || s.cardId !== undefined || s.query !== undefined ? false : undefined),
 			};
 		}
 		await super.setState(state, result);
@@ -82,12 +113,15 @@ export class AnkiView extends ItemView {
 
 	override getState(): Record<string, unknown> {
 		return {
+			card: this.config.card,
+			cardId: this.config.cardId,
 			deck: this.config.deck,
 			query: this.config.query,
 			limit: this.config.limit,
 			filter: this.config.filter,
 			randomize: this.config.randomize,
 			select: this.config.select,
+			live: this.config.live,
 		};
 	}
 
@@ -97,6 +131,10 @@ export class AnkiView extends ItemView {
 	}
 
 	private renderPlayer(): void {
+		if (this.player) {
+			this.player.destroy();
+			this.player = null;
+		}
 		this.contentEl.empty();
 		const playerContainer = this.contentEl.createDiv({ cls: 'anki-embed-container is-full-view' });
 		this.player = new DeckPlayer(
@@ -110,7 +148,9 @@ export class AnkiView extends ItemView {
 				this.config.deck = deck;
 				this.config.select = false;
 				this.app.workspace.requestSaveLayout();
-			}
+			},
+			this.app,
+			this.saveSettings
 		);
 		void this.player.init();
 	}

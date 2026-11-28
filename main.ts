@@ -1,12 +1,30 @@
-import { App, Editor, Notice, Plugin, PluginSettingTab, WorkspaceLeaf } from 'obsidian';
+import { App, Editor, Notice, Plugin, PluginSettingTab, TFile, WorkspaceLeaf } from 'obsidian';
 import type { SettingDefinitionItem } from 'obsidian';
 import { AnkiClient } from './src/anki-client';
 import { AnkiView } from './src/anki-view';
 import { DeckPlayer } from './src/deck-player';
 import { DeckSelectModal } from './src/deck-modal';
+import { TagSelectModal } from './src/tag-modal';
+import { LinkedCardsManageModal } from './src/linked-cards-modal';
 import { AnkiImportModal } from './src/import-modal';
+import { AnkiRemoteConfigModal } from './src/remote-modal';
 import { parseDeckConfig, parsePastedAnkiText } from './src/parser';
-import { AnkiEmbedSettings, DEFAULT_SETTINGS, DeckEmbedConfig, VIEW_TYPE_ANKI_EMBED } from './src/types';
+import { buildAnkiTagQuery } from './src/card-html';
+import {
+	getLinkedCardIdsForNote,
+	linkTagToNote,
+	syncNoteLinksWithSettings,
+	unlinkAllCardsFromNote,
+	unlinkCardFromNote,
+} from './src/link-service';
+import {
+	AnkiEmbedSettings,
+	DEFAULT_GAMEPAD_MAPPING,
+	DEFAULT_KEYBOARD_MAPPING,
+	DEFAULT_SETTINGS,
+	DeckEmbedConfig,
+	VIEW_TYPE_ANKI_EMBED,
+} from './src/types';
 
 export default class AnkiEmbedPlugin extends Plugin {
 	settings!: AnkiEmbedSettings;
@@ -19,7 +37,15 @@ export default class AnkiEmbedPlugin extends Plugin {
 
 		this.registerView(
 			VIEW_TYPE_ANKI_EMBED,
-			(leaf) => new AnkiView(leaf, this.client, () => this.settings)
+			(leaf) =>
+				new AnkiView(
+					leaf,
+					this.client,
+					() => this.settings,
+					async (updated) => {
+						await this.saveData(updated);
+					}
+				)
 		);
 
 		this.addSettingTab(new AnkiEmbedSettingTab(this.app, this));
@@ -72,7 +98,12 @@ export default class AnkiEmbedPlugin extends Plugin {
 				(cfg) => {
 					void this.activateView(cfg);
 				},
-				false
+				false,
+				undefined,
+				this.app,
+				async (updated) => {
+					await this.saveData(updated);
+				}
 			);
 			void player.init();
 		};
@@ -80,12 +111,66 @@ export default class AnkiEmbedPlugin extends Plugin {
 		this.registerMarkdownCodeBlockProcessor('anki', renderCodeBlock);
 		this.registerMarkdownCodeBlockProcessor('anki-embed', renderCodeBlock);
 
+		// Register obsidian:// protocol handlers for clickable card links
+		this.registerObsidianProtocolHandler('anki-card', (params) => {
+			const cardId = params['cardId'] || params['card'] || params['cid'];
+			const action = params['action'];
+			if (cardId) {
+				const num = Number.parseInt(cardId, 10);
+				if (!Number.isNaN(num) && num > 0) {
+					if (action === 'unlink') {
+						const filePath = params['file'];
+						const target = filePath ? this.app.vault.getAbstractFileByPath(filePath) : this.app.workspace.getActiveFile();
+						if (target instanceof TFile) {
+							void this.unlinkCardFromNote(target, num);
+							return;
+						}
+					}
+					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false, live: false });
+				}
+			}
+		});
+
+		this.registerObsidianProtocolHandler('anki-embed', (params) => {
+			const cardId = params['cardId'] || params['card'] || params['cid'];
+			if (cardId) {
+				const num = Number.parseInt(cardId, 10);
+				if (!Number.isNaN(num) && num > 0) {
+					void this.activateView({ card: num, cardId: num, query: `cid:${num}`, select: false, live: false });
+				}
+			} else if (params['deck']) {
+				void this.activateView({ deck: params['deck'], select: false });
+			}
+		});
+
 		// Commands
 		this.addCommand({
 			id: 'open-anki-review-in-full-view',
 			name: 'Open Anki review in full view',
 			callback: () => {
 				void this.activateView();
+			},
+		});
+
+		this.addCommand({
+			id: 'toggle-anki-fullscreen-review',
+			name: 'Toggle Anki fullscreen review mode',
+			callback: () => {
+				const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+				for (const leaf of leaves) {
+					if (leaf.view instanceof AnkiView) {
+						leaf.view.toggleAnkiFullscreen();
+						return;
+					}
+				}
+				void this.activateView().then(() => {
+					const activeLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+					for (const leaf of activeLeaves) {
+						if (leaf.view instanceof AnkiView) {
+							leaf.view.toggleAnkiFullscreen(true);
+						}
+					}
+				});
 			},
 		});
 
@@ -169,9 +254,256 @@ export default class AnkiEmbedPlugin extends Plugin {
 				new AnkiImportModal(this.app, this.client).open();
 			},
 		});
+
+		this.addCommand({
+			id: 'customize-anki-remote',
+			name: 'Customize Anki remote and controller buttons',
+			callback: () => {
+				new AnkiRemoteConfigModal(this.app, this).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'link-anki-tag-to-current-note',
+			name: 'Link Anki tag to current note',
+			callback: () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice('Please open a note first to link an Anki tag.');
+					return;
+				}
+				new TagSelectModal(this.app, this.client, (tag: string) => {
+					void this.linkTagToNote(activeFile, tag);
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'insert-anki-tag-at-cursor',
+			name: 'Insert Anki tag into editor',
+			editorCallback: (editor: Editor) => {
+				new TagSelectModal(this.app, this.client, (tag: string) => {
+					const cursor = editor.getCursor();
+					editor.replaceRange(`#anki/${tag} `, cursor);
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'search-and-copy-anki-tag',
+			name: 'Search and copy Anki tag',
+			callback: () => {
+				new TagSelectModal(this.app, this.client, (tag: string) => {
+					void navigator.clipboard.writeText(`anki-tags: ["${tag}"]`).then(() => {
+						new Notice(`Copied "anki-tags: ["${tag}"]" to clipboard`);
+					});
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'manage-linked-anki-cards',
+			name: 'Manage linked Anki cards for active note',
+			callback: () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice('Please open a note first to manage linked Anki cards.');
+					return;
+				}
+				void this.openLinkedCardsModal(activeFile);
+			},
+		});
+
+		this.addCommand({
+			id: 'unlink-anki-cards-from-note',
+			name: 'Unlink Anki cards from active note',
+			callback: () => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) {
+					new Notice('Please open a note first to unlink Anki cards.');
+					return;
+				}
+				void this.openLinkedCardsModal(activeFile);
+			},
+		});
+
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					menu.addItem((item) => {
+						item.setTitle('Manage linked Anki cards')
+							.setIcon('link')
+							.onClick(() => {
+								void this.openLinkedCardsModal(file);
+							});
+					});
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.workspace.on('editor-menu', (menu, _editor, info) => {
+				const file = info.file;
+				if (file instanceof TFile && file.extension === 'md') {
+					menu.addItem((item) => {
+						item.setTitle('Manage linked Anki cards')
+							.setIcon('link')
+							.onClick(() => {
+								void this.openLinkedCardsModal(file);
+							});
+					});
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.metadataCache.on('changed', (file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					void this.handleNoteMetadataChanged(file);
+				}
+			})
+		);
+
+		// Click on a linked card chip in Properties to open that card in Anki review
+		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+			const target = evt.target as HTMLElement | null;
+			if (!target) return;
+
+			// Strictly only trigger when clicking directly on the pill content (avoid remove button)
+			if (target.closest('.multi-select-pill-remove-button')) return;
+			const pill = target.closest<HTMLElement>('.multi-select-pill');
+			const pillContent = target.closest<HTMLElement>('.multi-select-pill-content') ?? pill?.querySelector<HTMLElement>('.multi-select-pill-content');
+			if (!pillContent) return;
+
+			// Ensure it is inside a card-linking property
+			const propEl = pillContent.closest<HTMLElement>('.metadata-property');
+			if (!propEl) return;
+
+			const key = propEl.getAttribute('data-property-key');
+			const cardKeys = [
+				'linked-cards',
+				'linked-card',
+				'linkedCards',
+				'linkedCard',
+				'linked_cards',
+				'linked_card',
+				'anki-cards',
+				'anki-card-id',
+				'anki-card',
+			];
+			const tagKeys = [
+				'anki-tags',
+				'anki-tag',
+				'anki_tags',
+				'anki_tag',
+				'ankitags',
+				'ankitag',
+			];
+			if (!key) return;
+
+			const normKey = key.toLowerCase().trim();
+			const isTagKey = tagKeys.includes(normKey);
+			const isNativeTagKey = normKey === 'tags' || normKey === 'tag';
+
+			if (cardKeys.includes(normKey)) {
+				const match = pillContent.textContent?.match(/\b(\d{8,})\b/);
+				if (match?.[1]) {
+					const cardId = Number.parseInt(match[1], 10);
+					if (!Number.isNaN(cardId) && cardId > 0) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						void this.activateView({ card: cardId, cardId, query: `cid:${cardId}`, select: false, live: false });
+					}
+				}
+			} else if (isTagKey || isNativeTagKey) {
+				const inputEl = pillContent.querySelector<HTMLInputElement>('input');
+				const rawTag = (inputEl ? inputEl.value : pillContent.textContent)?.trim() ?? '';
+				if (isNativeTagKey && !/^(?:#?\s*anki[-_/::])/i.test(rawTag)) {
+					return;
+				}
+				const query = buildAnkiTagQuery(rawTag);
+				if (query) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					void this.activateView({ query, select: false, live: false, excludeSuspended: false });
+				}
+			}
+		});
+	}
+
+	private async handleNoteMetadataChanged(file: TFile): Promise<void> {
+		const modified = await syncNoteLinksWithSettings(this.app, file, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+		if (modified) {
+			const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
+			for (const leaf of leaves) {
+				if (leaf.view instanceof AnkiView) {
+					leaf.view.invalidateLinksCache();
+				}
+			}
+		}
+	}
+
+	async getLinkedCardIdsForNote(file: TFile): Promise<number[]> {
+		return getLinkedCardIdsForNote(this.app, file, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+	}
+
+	async unlinkCardFromNote(file: TFile, cardId: number): Promise<void> {
+		await unlinkCardFromNote(this.app, file, cardId, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+		new Notice(`Unlinked card ${cardId} from "${file.basename}"`);
+	}
+
+	async unlinkAllCardsFromNote(file: TFile): Promise<void> {
+		const cardIds = await this.getLinkedCardIdsForNote(file);
+		await unlinkAllCardsFromNote(this.app, file, cardIds, this.settings, async (s) => {
+			await this.saveData(s);
+		});
+		new Notice(`Unlinked ${cardIds.length} card(s) from "${file.basename}"`);
+	}
+
+	async openLinkedCardsModal(file: TFile): Promise<void> {
+		const cardIds = await this.getLinkedCardIdsForNote(file);
+		if (cardIds.length === 0) {
+			new Notice(`No Anki cards linked to "${file.basename}".`);
+			return;
+		}
+
+		new LinkedCardsManageModal(
+			this.app,
+			this.client,
+			file,
+			cardIds,
+			(cardId) => {
+				void this.activateView({ card: cardId, cardId, query: `cid:${cardId}`, select: false, live: false });
+			},
+			async (cardId) => {
+				await this.unlinkCardFromNote(file, cardId);
+			},
+			async () => {
+				await this.unlinkAllCardsFromNote(file);
+			}
+		).open();
+	}
+
+	async linkTagToNote(file: TFile, tag: string): Promise<void> {
+		try {
+			await linkTagToNote(this.app, file, tag);
+			new Notice(`Linked Anki tag "${tag}" to "${file.basename}"`);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to link tag: ${msg}`);
+		}
 	}
 
 	async activateView(config?: DeckEmbedConfig, newTab: boolean = true): Promise<AnkiView> {
+		if (config && (config.card !== undefined || config.cardId !== undefined || config.query !== undefined) && config.live === undefined) {
+			config.live = false;
+		}
 		let leaf: WorkspaceLeaf | null = null;
 		if (!newTab) {
 			const existingLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANKI_EMBED);
@@ -211,7 +543,7 @@ export default class AnkiEmbedPlugin extends Plugin {
 			this.settings.defaultLimit = DEFAULT_SETTINGS.defaultLimit;
 			repaired = true;
 		}
-		if (!['all', 'due', 'new'].includes(this.settings.defaultFilter)) {
+		if (!['all', 'due', 'new', 'due+new'].includes(this.settings.defaultFilter)) {
 			this.settings.defaultFilter = DEFAULT_SETTINGS.defaultFilter;
 			repaired = true;
 		}
@@ -225,6 +557,110 @@ export default class AnkiEmbedPlugin extends Plugin {
 		}
 		if (typeof this.settings.useCustomAnkiConnect !== 'boolean') {
 			this.settings.useCustomAnkiConnect = DEFAULT_SETTINGS.useCustomAnkiConnect;
+			repaired = true;
+		}
+		if (typeof this.settings.useCardStyles !== 'boolean') {
+			this.settings.useCardStyles = DEFAULT_SETTINGS.useCardStyles;
+			repaired = true;
+		}
+		if (typeof this.settings.liveSync !== 'boolean') {
+			this.settings.liveSync = DEFAULT_SETTINGS.liveSync;
+			repaired = true;
+		}
+		if (typeof this.settings.excludeSuspended !== 'boolean') {
+			this.settings.excludeSuspended = DEFAULT_SETTINGS.excludeSuspended;
+			repaired = true;
+		}
+		if (!['reviews-first', 'random', 'default'].includes(this.settings.cardOrder)) {
+			this.settings.cardOrder = DEFAULT_SETTINGS.cardOrder;
+			repaired = true;
+		}
+		if (typeof this.settings.showCardCounts !== 'boolean') {
+			this.settings.showCardCounts = DEFAULT_SETTINGS.showCardCounts;
+			repaired = true;
+		}
+		if (typeof this.settings.showHeatmap !== 'boolean') {
+			this.settings.showHeatmap = DEFAULT_SETTINGS.showHeatmap;
+			repaired = true;
+		}
+		if (typeof this.settings.enableCardTimer !== 'boolean') {
+			this.settings.enableCardTimer = DEFAULT_SETTINGS.enableCardTimer;
+			repaired = true;
+		}
+		if (typeof this.settings.timerWarningSeconds !== 'number' || this.settings.timerWarningSeconds <= 0) {
+			this.settings.timerWarningSeconds = DEFAULT_SETTINGS.timerWarningSeconds;
+			repaired = true;
+		}
+		if (typeof this.settings.timerLimitSeconds !== 'number' || this.settings.timerLimitSeconds <= 0) {
+			this.settings.timerLimitSeconds = DEFAULT_SETTINGS.timerLimitSeconds;
+			repaired = true;
+		}
+		if (typeof this.settings.enableRatingFlash !== 'boolean') {
+			this.settings.enableRatingFlash = DEFAULT_SETTINGS.enableRatingFlash;
+			repaired = true;
+		}
+		if (typeof this.settings.ratingFlashDurationMs !== 'number' || this.settings.ratingFlashDurationMs < 0) {
+			this.settings.ratingFlashDurationMs = DEFAULT_SETTINGS.ratingFlashDurationMs;
+			repaired = true;
+		}
+		if (typeof this.settings.ratingFlashTransitionMs !== 'number' || this.settings.ratingFlashTransitionMs < 0) {
+			this.settings.ratingFlashTransitionMs = DEFAULT_SETTINGS.ratingFlashTransitionMs;
+			repaired = true;
+		}
+		if (!['daily', 'custom'].includes(this.settings.cardAppendTarget)) {
+			this.settings.cardAppendTarget = DEFAULT_SETTINGS.cardAppendTarget;
+			repaired = true;
+		}
+		if (typeof this.settings.cardAppendCustomPath !== 'string') {
+			this.settings.cardAppendCustomPath = DEFAULT_SETTINGS.cardAppendCustomPath;
+			repaired = true;
+		}
+		if (typeof this.settings.cardAppendHeading !== 'string') {
+			this.settings.cardAppendHeading = DEFAULT_SETTINGS.cardAppendHeading;
+			repaired = true;
+		}
+		if (typeof this.settings.cardFontScale !== 'number' || this.settings.cardFontScale <= 0) {
+			this.settings.cardFontScale = DEFAULT_SETTINGS.cardFontScale;
+			repaired = true;
+		}
+		if (typeof this.settings.enableGamepad !== 'boolean') {
+			this.settings.enableGamepad = DEFAULT_SETTINGS.enableGamepad;
+			repaired = true;
+		}
+		if (typeof this.settings.enableCardLinks !== 'boolean') {
+			this.settings.enableCardLinks = DEFAULT_SETTINGS.enableCardLinks;
+			repaired = true;
+		}
+		if (typeof this.settings.enableBacklinks !== 'boolean') {
+			this.settings.enableBacklinks = DEFAULT_SETTINGS.enableBacklinks;
+			repaired = true;
+		}
+		if (typeof this.settings.enableTagLinks !== 'boolean') {
+			this.settings.enableTagLinks = DEFAULT_SETTINGS.enableTagLinks;
+			repaired = true;
+		}
+		if (typeof this.settings.autoLinkExportedCard !== 'boolean') {
+			this.settings.autoLinkExportedCard = DEFAULT_SETTINGS.autoLinkExportedCard;
+			repaired = true;
+		}
+		if (typeof this.settings.cardExportFolder !== 'string') {
+			this.settings.cardExportFolder = DEFAULT_SETTINGS.cardExportFolder;
+			repaired = true;
+		}
+		if (typeof this.settings.enableLearningMode !== 'boolean') {
+			this.settings.enableLearningMode = DEFAULT_SETTINGS.enableLearningMode;
+			repaired = true;
+		}
+		if (!['due-new-future', 'due-future-new'].includes(this.settings.learningOrder)) {
+			this.settings.learningOrder = DEFAULT_SETTINGS.learningOrder;
+			repaired = true;
+		}
+		if (!this.settings.gamepadMapping || typeof this.settings.gamepadMapping !== 'object') {
+			this.settings.gamepadMapping = Object.assign({}, DEFAULT_GAMEPAD_MAPPING);
+			repaired = true;
+		}
+		if (!this.settings.keyboardMapping || typeof this.settings.keyboardMapping !== 'object') {
+			this.settings.keyboardMapping = Object.assign({}, DEFAULT_KEYBOARD_MAPPING);
 			repaired = true;
 		}
 
@@ -298,9 +734,231 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							defaultValue: DEFAULT_SETTINGS.defaultFilter,
 							options: {
 								all: 'All cards',
+								'due+new': 'Due and new cards',
 								due: 'Due cards only',
 								new: 'New cards only',
 							},
+						},
+					},
+					{
+						name: 'Card study order',
+						desc: 'Determine which cards appear first in review sessions.',
+						control: {
+							type: 'dropdown',
+							key: 'cardOrder',
+							defaultValue: DEFAULT_SETTINGS.cardOrder,
+							options: {
+								'reviews-first': 'Reviews first (due reviews before new cards)',
+								random: 'Randomized mix',
+								default: 'Deck order',
+							},
+						},
+					},
+					{
+						name: 'Enable learning mode',
+						desc: 'Actively re-queue learning cards on rating and prioritize cards by Anki due status.',
+						control: {
+							type: 'toggle',
+							key: 'enableLearningMode',
+							defaultValue: DEFAULT_SETTINGS.enableLearningMode,
+						},
+					},
+					{
+						name: 'Learning mode card order',
+						desc: 'Choose whether new cards or future review cards are presented after due cards in learning mode.',
+						control: {
+							type: 'dropdown',
+							key: 'learningOrder',
+							defaultValue: DEFAULT_SETTINGS.learningOrder,
+							options: {
+								'due-new-future': 'Due > New > Future reviews (Default)',
+								'due-future-new': 'Due > Future reviews > New',
+							},
+						},
+					},
+					{
+						name: 'Exclude suspended cards',
+						desc: 'Automatically exclude suspended cards (-is:suspended) from study sessions.',
+						control: {
+							type: 'toggle',
+							key: 'excludeSuspended',
+							defaultValue: DEFAULT_SETTINGS.excludeSuspended,
+						},
+					},
+					{
+						name: 'Show card counts (New, Learn, Review)',
+						desc: 'Display the remaining new, learning, and review card counts at the bottom of the card like in Anki desktop.',
+						control: {
+							type: 'toggle',
+							key: 'showCardCounts',
+							defaultValue: DEFAULT_SETTINGS.showCardCounts,
+						},
+					},
+					{
+						name: 'Show review heatmap',
+						desc: 'Display an Anki review activity heatmap on the deck selection screen.',
+						control: {
+							type: 'toggle',
+							key: 'showHeatmap',
+							defaultValue: DEFAULT_SETTINGS.showHeatmap,
+						},
+					},
+					{
+						name: 'Enable card timer',
+						desc: 'Show a timer on the review card tracking time spent, with warning and overtime states.',
+						control: {
+							type: 'toggle',
+							key: 'enableCardTimer',
+							defaultValue: DEFAULT_SETTINGS.enableCardTimer,
+						},
+					},
+					{
+						name: 'Timer warning threshold (seconds)',
+						desc: 'Time at which the timer turns yellow as a warning (default: 5s).',
+						control: {
+							type: 'slider',
+							key: 'timerWarningSeconds',
+							defaultValue: DEFAULT_SETTINGS.timerWarningSeconds,
+							min: 1,
+							max: 60,
+							step: 1,
+						},
+					},
+					{
+						name: 'Timer limit threshold (seconds)',
+						desc: 'Time at which the timer turns red and resets your streak (default: 10s).',
+						control: {
+							type: 'slider',
+							key: 'timerLimitSeconds',
+							defaultValue: DEFAULT_SETTINGS.timerLimitSeconds,
+							min: 2,
+							max: 120,
+							step: 1,
+						},
+					},
+					{
+						name: 'Flash rating button on selection',
+						desc: 'Briefly flash the selected rating button (Again, Hard, Good, Easy) for visual feedback when clicking, using keyboard, or using remote controls.',
+						control: {
+							type: 'toggle',
+							key: 'enableRatingFlash',
+							defaultValue: DEFAULT_SETTINGS.enableRatingFlash,
+						},
+					},
+					{
+						name: 'Rating button flash duration (ms)',
+						desc: 'Duration to hold the button flash effect before advancing to the next card (default: 25ms). Set to 0 for no delay.',
+						control: {
+							type: 'slider',
+							key: 'ratingFlashDurationMs',
+							defaultValue: DEFAULT_SETTINGS.ratingFlashDurationMs,
+							min: 0,
+							max: 200,
+							step: 5,
+						},
+					},
+					{
+						name: 'Rating button transition time (ms)',
+						desc: 'Animation transition duration for the button flash effect (default: 20ms).',
+						control: {
+							type: 'slider',
+							key: 'ratingFlashTransitionMs',
+							defaultValue: DEFAULT_SETTINGS.ratingFlashTransitionMs,
+							min: 0,
+							max: 100,
+							step: 5,
+						},
+					},
+					{
+						name: 'Card append destination',
+						desc: 'Choose whether appending a card adds it to today\'s daily note or a specific custom note.',
+						control: {
+							type: 'dropdown',
+							key: 'cardAppendTarget',
+							defaultValue: DEFAULT_SETTINGS.cardAppendTarget,
+							options: {
+								daily: 'Today\'s daily note',
+								custom: 'Custom note',
+							},
+						},
+					},
+					{
+						name: 'Custom note path for appending',
+						desc: 'Relative path in your vault where cards will be appended when target is set to custom (default: Anki Notes.md).',
+						control: {
+							type: 'text',
+							key: 'cardAppendCustomPath',
+							placeholder: 'Anki Notes.md',
+						},
+					},
+					{
+						name: 'Heading for appended cards',
+						desc: 'Heading in the target note under which cards will be appended (leave blank to append at the end).',
+						control: {
+							type: 'text',
+							key: 'cardAppendHeading',
+							placeholder: '## Anki Reviews',
+						},
+					},
+					{
+						name: 'Card export folder',
+						desc: 'Folder where newly created notes from Anki cards will be saved (leave blank to save in vault root).',
+						control: {
+							type: 'text',
+							key: 'cardExportFolder',
+							placeholder: 'e.g. Cards or Anki/Exported',
+						},
+					},
+					{
+						name: 'Enable card note linking',
+						desc: 'Display the link button in card headers to link cards with Obsidian notes.',
+						control: {
+							type: 'toggle',
+							key: 'enableCardLinks',
+							defaultValue: DEFAULT_SETTINGS.enableCardLinks,
+						},
+					},
+					{
+						name: 'Enable backlinks detection',
+						desc: 'Scan the vault for notes that mention or embed this card (backlinks). Requires card note linking to be enabled.',
+						control: {
+							type: 'toggle',
+							key: 'enableBacklinks',
+							defaultValue: DEFAULT_SETTINGS.enableBacklinks,
+						},
+					},
+					{
+						name: 'Enable tag-based note linking',
+						desc: 'Automatically link cards to notes in your vault that share matching Anki tags (via anki-tags frontmatter or #anki/... tags).',
+						control: {
+							type: 'toggle',
+							key: 'enableTagLinks',
+							defaultValue: DEFAULT_SETTINGS.enableTagLinks,
+						},
+					},
+					{
+						name: 'Automatically link exported card notes',
+						desc: 'Automatically link notes created or exported from Anki cards so they appear in backlinks and the links menu (enabled by default).',
+						control: {
+							type: 'toggle',
+							key: 'autoLinkExportedCard',
+							defaultValue: DEFAULT_SETTINGS.autoLinkExportedCard,
+						},
+					},
+					{
+						name: 'Enable Anki Remote and controller support',
+						desc: 'Support gamepads, 8BitDo Micro/Zero 2, and Bluetooth remotes (ContAnki style) for rating, flipping, undoing, and suspending.',
+						control: {
+							type: 'toggle',
+							key: 'enableGamepad',
+							defaultValue: DEFAULT_SETTINGS.enableGamepad,
+						},
+					},
+					{
+						name: 'Customize remote controls and test buttons',
+						desc: 'Test your connected gamepad or remote buttons in real time and customize review actions for each button.',
+						action: () => {
+							new AnkiRemoteConfigModal(this.app, this.plugin).open();
 						},
 					},
 					{
@@ -310,6 +968,50 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 							type: 'toggle',
 							key: 'randomizeCards',
 							defaultValue: DEFAULT_SETTINGS.randomizeCards,
+						},
+					},
+					{
+						name: 'Use original Anki card styles',
+						desc: 'Display cards using the original CSS styling from your Anki note types.',
+						control: {
+							type: 'toggle',
+							key: 'useCardStyles',
+							defaultValue: DEFAULT_SETTINGS.useCardStyles,
+						},
+					},
+					{
+						name: 'Card font size scale',
+						desc: 'Scale card font size relative to the original Anki note styling (e.g. x1.1, x1.2 up to x2.5).',
+						control: {
+							type: 'dropdown',
+							key: 'cardFontScale',
+							defaultValue: '1',
+							options: {
+								'0.8': 'x0.8 (Smaller)',
+								'0.9': 'x0.9',
+								'1': 'x1.0 (Original size)',
+								'1.1': 'x1.1',
+								'1.2': 'x1.2',
+								'1.3': 'x1.3',
+								'1.4': 'x1.4',
+								'1.5': 'x1.5',
+								'1.6': 'x1.6',
+								'1.7': 'x1.7',
+								'1.8': 'x1.8',
+								'1.9': 'x1.9',
+								'2': 'x2.0 (Double)',
+								'2.2': 'x2.2',
+								'2.5': 'x2.5',
+							},
+						},
+					},
+					{
+						name: 'Live sync with Anki desktop reviewer',
+						desc: 'Mirror the active review screen from the Anki desktop app. Answering in Obsidian advances Anki, and answering in Anki advances Obsidian.',
+						control: {
+							type: 'toggle',
+							key: 'liveSync',
+							defaultValue: DEFAULT_SETTINGS.liveSync,
 						},
 					},
 					{
@@ -326,7 +1028,21 @@ class AnkiEmbedSettingTab extends PluginSettingTab {
 		];
 	}
 
+	getControlValue(key: string): unknown {
+		if (key === 'cardFontScale') {
+			const val = this.plugin.settings.cardFontScale ?? 1.0;
+			return String(val);
+		}
+		return super.getControlValue(key);
+	}
+
 	async setControlValue(key: string, value: unknown): Promise<void> {
+		if (key === 'cardFontScale') {
+			const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
+			this.plugin.settings.cardFontScale = Number.isNaN(parsed) || parsed <= 0 ? 1.0 : parsed;
+			await this.plugin.saveData(this.plugin.settings);
+			return;
+		}
 		await super.setControlValue(key, value);
 		if (key === 'ankiConnectUrl' || key === 'apiKey') {
 			this.plugin.client.setConfig(this.plugin.settings.ankiConnectUrl, this.plugin.settings.apiKey);

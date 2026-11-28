@@ -1,13 +1,120 @@
-import { sanitizeHTMLToDom, Notice } from 'obsidian';
+import { sanitizeHTMLToDom, Notice, Menu, setTooltip, TFile, setIcon, Component, MarkdownRenderer } from 'obsidian';
+import type { App, EventRef } from 'obsidian';
 import { AnkiClient } from './anki-client';
-import { extractAnswerHtml, formatCardHtml } from './card-html';
-import { AnkiCardInfo, AnkiEmbedSettings, DeckEmbedConfig } from './types';
+import {
+	checkFrontmatterForCardId,
+	extractAnkiTagsFromNote,
+	extractAnkiTagsFromText,
+	extractAnswerHtml,
+	findMatchingAnkiTag,
+	isDeckOrSubdeck,
+	isSameDeck,
+	formatCardHtml,
+	formatClozeTitle,
+	getCardStatusPill,
+	isClozeCard,
+	normalizeAnkiCss,
+	normalizeAnkiTag,
+	sortCardsForLearningMode,
+} from './card-html';
+import {
+	linkCardToNote,
+	linkTagToNote,
+	unlinkCardFromNote,
+} from './link-service';
+import { AnkiRemoteConfigModal } from './remote-modal';
+import { NoteSelectModal } from './note-modal';
+import { TagSelectModal } from './tag-modal';
+import {
+	ANKI_FLAG_CONFIGS,
+	AnkiCardInfo,
+	AnkiEmbedSettings,
+	CardLinkedNotes,
+	CardTagLink,
+	DEFAULT_GAMEPAD_MAPPING,
+	DEFAULT_KEYBOARD_MAPPING,
+	DeckEmbedConfig,
+	LearningOrder,
+	RemoteAction,
+} from './types';
+
+interface DeckNode {
+	fullPath: string;
+	name: string;
+	children: DeckNode[];
+	level: number;
+}
+
+function buildDeckTree(deckNames: string[]): DeckNode[] {
+	const rootNodes: DeckNode[] = [];
+	const nodeMap = new Map<string, DeckNode>();
+
+	for (const fullName of deckNames) {
+		const parts = fullName.split('::');
+		let currentPath = '';
+
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i]!;
+			const prevPath = currentPath;
+			currentPath = currentPath ? `${currentPath}::${part}` : part;
+
+			if (!nodeMap.has(currentPath)) {
+				const node: DeckNode = {
+					fullPath: currentPath,
+					name: part,
+					children: [],
+					level: i,
+				};
+				nodeMap.set(currentPath, node);
+
+				if (i === 0) {
+					rootNodes.push(node);
+				} else {
+					const parentNode = nodeMap.get(prevPath);
+					if (parentNode) {
+						parentNode.children.push(node);
+					}
+				}
+			}
+		}
+	}
+
+	return rootNodes;
+}
+
+function filterDeckTree(nodes: DeckNode[], query: string, expandedDecks: Set<string>): DeckNode[] {
+	if (!query) return nodes;
+	const lower = query.toLowerCase();
+
+	const filterList = (list: DeckNode[]): DeckNode[] => {
+		const filtered: DeckNode[] = [];
+		for (const node of list) {
+			const selfMatch = node.name.toLowerCase().includes(lower) || node.fullPath.toLowerCase().includes(lower);
+			const matchingChildren = filterList(node.children);
+
+			if (selfMatch || matchingChildren.length > 0) {
+				expandedDecks.add(node.fullPath);
+				filtered.push({
+					fullPath: node.fullPath,
+					name: node.name,
+					children: matchingChildren,
+					level: node.level,
+				});
+			}
+		}
+		return filtered;
+	};
+
+	return filterList(nodes);
+}
 
 export class DeckPlayer {
 	private container: HTMLElement;
 	private config: DeckEmbedConfig;
 	private client: AnkiClient;
 	private settings: AnkiEmbedSettings;
+	private app?: App;
+	private saveSettings?: (settings: AnkiEmbedSettings) => Promise<void>;
 
 	private cards: AnkiCardInfo[] = [];
 	private currentIndex: number = 0;
@@ -15,8 +122,74 @@ export class DeckPlayer {
 	private isLoading: boolean = false;
 	private hasStarted: boolean = false;
 	private mediaCache = new Map<string, string | null>();
+	private modelStyleCache = new Map<string, string>();
+	private normalizedStyleCache = new Map<string, string>();
+	private preparedQuestionCache = new Map<number, DocumentFragment>();
+	private preparedAnswerCache = new Map<number, DocumentFragment>();
+	private headerEl: HTMLElement | null = null;
+	private cardEl: HTMLElement | null = null;
+	private footerEl: HTMLElement | null = null;
+	private currentShadowRoot: ShadowRoot | null = null;
+	private currentCardContainer: HTMLElement | null = null;
+	private currentModelName: string | null = null;
+	private currentFontScale: number | null = null;
+	private linkedNotesCache = new Map<number, CardLinkedNotes<TFile>>();
+	private cardTagsCache = new Map<number, string[]>();
+	private activeLinksDropdown: HTMLElement | null = null;
+	/** Re-renders the open links dropdown; set while one is open. */
+	private refreshActiveLinksDropdown: (() => void) | null = null;
+	/** Cards whose real tags have been fetched from Anki (not just scraped from the card's HTML). */
+	private realTagsLoaded = new Set<number>();
+	private vaultEventRefs: EventRef[] = [];
+	private linksRefreshTimer: number | null = null;
+	private linksDropdownCleanup: (() => void) | null = null;
+	private isPollingLiveCard = false;
+	private isReviewingLiveCard = false;
+	private lastUserActionTimestamp = 0;
 	private loadRequestId = 0;
 	private cardStartTime: number = 0;
+	private liveSyncTimer: number | null = null;
+	private onWindowFocusHandler: (() => void) | null = null;
+	private currentCounts: { new: number; learn: number; review: number; early?: number } | null = null;
+	private dueCardIds: Set<number> = new Set<number>();
+	private hasAcknowledgedEarlyReviews: boolean = false;
+	/** True while an offline answer is being saved to Anki, so a second key press can't grade twice. */
+	private isSavingAnswer = false;
+	private hasShownBrowseNotice = false;
+	private cardTimerInterval: number | null = null;
+	private timeStreak: number = 0;
+	private timerExceededForCurrentCard: boolean = false;
+	private isTimerPaused: boolean = false;
+	private timerPausedElapsedMs: number = 0;
+	private reviewHistory: Array<{
+		card: AnkiCardInfo;
+		index: number;
+		statsDelta: 1 | 2 | 3 | 4;
+		timeStreakBefore: number;
+	}> = [];
+	private gamepadInterval: number | null = null;
+	private prevGamepadButtons: boolean[] = [];
+	private connectedGamepadName: string | null = null;
+	private onGamepadConnectedHandler: ((e: GamepadEvent) => void) | null = null;
+	private onGamepadDisconnectedHandler: ((e: GamepadEvent) => void) | null = null;
+
+	public get isLearningMode(): boolean {
+		if (this.config.learning !== undefined) {
+			return this.config.learning;
+		}
+		return this.settings.enableLearningMode ?? true;
+	}
+
+	public set isLearningMode(val: boolean) {
+		this.config.learning = val;
+	}
+
+	private get isLiveSync(): boolean {
+		if (this.config.card !== undefined || this.config.cardId !== undefined || this.config.query !== undefined) {
+			return this.config.live === true;
+		}
+		return this.config.live ?? this.settings.liveSync;
+	}
 
 	private sessionStats = {
 		again: 0,
@@ -28,6 +201,106 @@ export class DeckPlayer {
 	private onOpenFullView?: (config: DeckEmbedConfig) => void;
 	private onDeckChange?: (deck: string) => void;
 	private isFullView: boolean;
+	public isAnkiFullscreen: boolean = false;
+	private wasNativeFullscreen: boolean = false;
+	private activeSideNoteFile: TFile | null = null;
+	private activeSideNoteComponent: Component | null = null;
+
+	private documentKeydownHandler = (evt: KeyboardEvent) => {
+		const modeOverlay = this.container.querySelector<HTMLElement>('.anki-mode-select-overlay');
+		if (modeOverlay && evt.key === 'Escape') {
+			evt.preventDefault();
+			evt.stopPropagation();
+			modeOverlay.remove();
+			return;
+		}
+
+		// If an Obsidian modal, prompt, menu or suggestion is open, let Obsidian handle all keys
+		if (typeof document !== 'undefined' && document.querySelector('.modal-container, .prompt, .menu, .suggestion-container')) {
+			return;
+		}
+
+		// Handle command palette / quick switcher shortcuts explicitly or pass modifiers through
+		if (evt.ctrlKey || evt.metaKey || evt.altKey) {
+			const lowerKey = evt.key.toLowerCase();
+			if ((evt.ctrlKey || evt.metaKey) && lowerKey === 'p') {
+				if (this.isAnkiFullscreen) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					this.showFullscreenToast('Exit fullscreen mode (esc) to use Obsidian commands');
+					return;
+				}
+				const appWithCommands = this.app as { commands?: { executeCommandById?: (id: string) => void } };
+				if (appWithCommands?.commands?.executeCommandById) {
+					evt.preventDefault();
+					appWithCommands.commands.executeCommandById('command-palette:open');
+					return;
+				}
+			} else if ((evt.ctrlKey || evt.metaKey) && lowerKey === 'o') {
+				if (this.isAnkiFullscreen) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					this.showFullscreenToast('Exit fullscreen mode (esc) to use Obsidian commands');
+					return;
+				}
+				const appWithCommands = this.app as { commands?: { executeCommandById?: (id: string) => void } };
+				if (appWithCommands?.commands?.executeCommandById) {
+					evt.preventDefault();
+					appWithCommands.commands.executeCommandById('switcher:open');
+					return;
+				}
+			} else if (this.isAnkiFullscreen && this.cards.length > 0 && this.currentIndex < this.cards.length) {
+				if ((evt.ctrlKey || evt.metaKey) && evt.key >= '0' && evt.key <= '7') {
+					evt.preventDefault();
+					const flagNum = parseInt(evt.key, 10);
+					void this.setFlagForCurrentCard(flagNum);
+					return;
+				}
+			}
+			return;
+		}
+
+		if (evt.target instanceof HTMLInputElement || evt.target instanceof HTMLTextAreaElement || evt.target instanceof HTMLSelectElement) {
+			if (evt.key === 'F11') {
+				evt.preventDefault();
+				this.toggleAnkiFullscreen();
+				return;
+			}
+			if (evt.key === 'Escape' && this.isAnkiFullscreen) {
+				const inputEl = evt.target;
+				if (inputEl instanceof HTMLInputElement && inputEl.value) {
+					return;
+				}
+				evt.preventDefault();
+				if (this.activeSideNoteFile) {
+					this.closeFullscreenSideNote();
+				} else {
+					this.toggleAnkiFullscreen(false);
+				}
+				return;
+			}
+			return;
+		}
+		if (evt.key === 'F11') {
+			evt.preventDefault();
+			this.toggleAnkiFullscreen();
+		} else if (evt.key === 'Escape' && this.isAnkiFullscreen) {
+			evt.preventDefault();
+			if (this.activeSideNoteFile) {
+				this.closeFullscreenSideNote();
+			} else {
+				this.toggleAnkiFullscreen(false);
+			}
+		}
+	};
+
+	private fullscreenChangeHandler = () => {
+		if (typeof document === 'undefined') return;
+		const isFs = document.fullscreenElement === this.container;
+		if (!isFs && this.isAnkiFullscreen && this.wasNativeFullscreen) {
+			this.toggleAnkiFullscreen(false);
+		}
+	};
 
 	constructor(
 		container: HTMLElement,
@@ -36,7 +309,9 @@ export class DeckPlayer {
 		settings: AnkiEmbedSettings,
 		onOpenFullView?: (config: DeckEmbedConfig) => void,
 		isFullView: boolean = false,
-		onDeckChange?: (deck: string) => void
+		onDeckChange?: (deck: string) => void,
+		app?: App,
+		saveSettings?: (settings: AnkiEmbedSettings) => Promise<void>
 	) {
 		this.container = container;
 		this.config = config;
@@ -45,6 +320,8 @@ export class DeckPlayer {
 		this.onOpenFullView = onOpenFullView;
 		this.isFullView = isFullView;
 		this.onDeckChange = onDeckChange;
+		this.app = app;
+		this.saveSettings = saveSettings;
 	}
 
 	public async init(): Promise<void> {
@@ -52,19 +329,166 @@ export class DeckPlayer {
 		this.container.addClass('anki-embed-container');
 		if (this.isFullView) {
 			this.container.addClass('is-full-view');
+			this.container.addClass('is-selected');
 		}
 		this.container.tabIndex = 0;
 
+		this.setupSelectionListeners();
 		this.registerKeyboardShortcuts();
+		this.watchVaultForLinkChanges();
+		if (typeof document !== 'undefined') {
+			document.addEventListener('keydown', this.documentKeydownHandler);
+			document.addEventListener('fullscreenchange', this.fullscreenChangeHandler);
+		}
+		this.initGamepad();
 		await this.loadCards();
 		if (this.isFullView) {
 			this.container.focus();
 		}
 	}
 
+	private setupSelectionListeners(): void {
+		this.container.addEventListener('click', (evt: MouseEvent) => {
+			this.container.focus();
+			this.selectReviewBox();
+
+			if (this.isAnkiFullscreen) {
+				const path = evt.composedPath();
+				for (const node of path) {
+					if (node instanceof HTMLAnchorElement) {
+						const href = node.getAttribute('href');
+						if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+							this.toggleAnkiFullscreen(false);
+							break;
+						}
+					}
+				}
+			}
+		});
+
+		this.container.addEventListener('focusin', () => {
+			this.selectReviewBox();
+		});
+
+		this.container.addEventListener('focusout', (evt: FocusEvent) => {
+			if (!this.container.contains(evt.relatedTarget as Node)) {
+				this.container.removeClass('is-selected');
+			}
+		});
+	}
+
+	private selectReviewBox(): void {
+		if (typeof document !== 'undefined') {
+			const allEmbeds = document.querySelectorAll('.anki-embed-container.is-selected');
+			allEmbeds.forEach(el => {
+				if (el !== this.container) {
+					el.removeClass('is-selected');
+				}
+			});
+		}
+		this.container.addClass('is-selected');
+	}
+
+	private isReviewBoxSelected(): boolean {
+		if (this.isFullView) return true;
+		if (typeof document === 'undefined') return true;
+		return (
+			this.container === document.activeElement ||
+			this.container.contains(document.activeElement) ||
+			this.container.hasClass('is-selected')
+		);
+	}
+
 	private registerKeyboardShortcuts() {
 		this.container.addEventListener('keydown', (evt: KeyboardEvent) => {
+			const modeOverlay = this.container.querySelector<HTMLElement>('.anki-mode-select-overlay');
+			if (modeOverlay && evt.key === 'Escape') {
+				evt.preventDefault();
+				evt.stopPropagation();
+				modeOverlay.remove();
+				return;
+			}
+
+			// If an Obsidian modal, prompt, menu or suggestion is open, let Obsidian handle all keys
+			if (typeof document !== 'undefined' && document.querySelector('.modal-container, .prompt, .menu, .suggestion-container')) {
+				return;
+			}
+
+			// Handle command palette / quick switcher shortcuts explicitly or pass modifiers through
+			if (evt.ctrlKey || evt.metaKey || evt.altKey) {
+				const lowerKey = evt.key.toLowerCase();
+				if ((evt.ctrlKey || evt.metaKey) && lowerKey === 'p') {
+					if (this.isAnkiFullscreen) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						this.showFullscreenToast('Exit fullscreen mode (esc) to use Obsidian commands');
+						return;
+					}
+					const appWithCommands = this.app as { commands?: { executeCommandById?: (id: string) => void } };
+					if (appWithCommands?.commands?.executeCommandById) {
+						evt.preventDefault();
+						appWithCommands.commands.executeCommandById('command-palette:open');
+						return;
+					}
+				} else if ((evt.ctrlKey || evt.metaKey) && lowerKey === 'o') {
+					if (this.isAnkiFullscreen) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						this.showFullscreenToast('Exit fullscreen mode (esc) to use Obsidian commands');
+						return;
+					}
+					const appWithCommands = this.app as { commands?: { executeCommandById?: (id: string) => void } };
+					if (appWithCommands?.commands?.executeCommandById) {
+						evt.preventDefault();
+						appWithCommands.commands.executeCommandById('switcher:open');
+						return;
+					}
+				} else if (this.cards.length > 0 && this.currentIndex < this.cards.length) {
+					if ((evt.ctrlKey || evt.metaKey) && evt.key >= '0' && evt.key <= '7') {
+						evt.preventDefault();
+						const flagNum = parseInt(evt.key, 10);
+						void this.setFlagForCurrentCard(flagNum);
+						return;
+					}
+				}
+				return;
+			}
+
 			if (evt.target instanceof HTMLInputElement || evt.target instanceof HTMLTextAreaElement || evt.target instanceof HTMLSelectElement) {
+				if (evt.key === 'F11') {
+					evt.preventDefault();
+					this.toggleAnkiFullscreen();
+					return;
+				}
+				if (evt.key === 'Escape' && this.isAnkiFullscreen) {
+					const inputEl = evt.target;
+					if (inputEl instanceof HTMLInputElement && inputEl.value) {
+						return;
+					}
+					evt.preventDefault();
+					if (this.activeSideNoteFile) {
+						this.closeFullscreenSideNote();
+					} else {
+						this.toggleAnkiFullscreen(false);
+					}
+					return;
+				}
+				return;
+			}
+
+			if (evt.key === 'F11') {
+				evt.preventDefault();
+				this.toggleAnkiFullscreen();
+				return;
+			}
+
+			if (evt.key === 'Escape' && this.isAnkiFullscreen) {
+				evt.preventDefault();
+				if (this.activeSideNoteFile) {
+					this.closeFullscreenSideNote();
+				} else {
+					this.toggleAnkiFullscreen(false);
+				}
 				return;
 			}
 
@@ -72,34 +496,38 @@ export class DeckPlayer {
 				return;
 			}
 
-			if (!this.hasStarted) {
-				if (evt.key === ' ' || evt.key === 'Enter') {
-					evt.preventDefault();
-					this.hasStarted = true;
-					void this.renderCurrentCard();
-				}
+			if (evt.key.toLowerCase() === 'r') {
+				evt.preventDefault();
+				void this.loadCards();
 				return;
 			}
 
-			if (evt.key === ' ' || evt.key === 'Enter') {
+			const mapping = this.settings.keyboardMapping ?? DEFAULT_KEYBOARD_MAPPING;
+			const key = evt.key.length === 1 ? evt.key.toLowerCase() : evt.key;
+			const action = mapping[key] ?? mapping[evt.key];
+
+			if (action && action !== 'none') {
 				evt.preventDefault();
-				if (!this.showingAnswer) {
-					void this.revealAnswer();
-				}
-			} else if (this.showingAnswer && ['1', '2', '3', '4'].includes(evt.key)) {
-				evt.preventDefault();
-				const ease = Number.parseInt(evt.key, 10) as 1 | 2 | 3 | 4;
-				void this.rateCurrentCard(ease);
-			} else if (evt.key.toLowerCase() === 'r') {
-				evt.preventDefault();
-				void this.loadCards();
+				this.executeRemoteAction(action);
 			}
 		});
 	}
 
 	private buildQuery(): string {
+		const targetCardId = this.config.card ?? this.config.cardId;
+		if (targetCardId) {
+			return `cid:${targetCardId}`;
+		}
+
+		const shouldExcludeSuspended = this.config.excludeSuspended ?? this.settings.excludeSuspended;
+		const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
+
 		if (this.config.query) {
-			return this.config.query;
+			let q = this.config.query;
+			if (shouldExcludeSuspended && !q.includes('is:suspended')) {
+				q = `${q} -is:suspended`;
+			}
+			return q;
 		}
 
 		const deckName = this.config.deck ? `deck:"${this.config.deck}"` : '';
@@ -110,15 +538,110 @@ export class DeckPlayer {
 			filterClause = 'is:due';
 		} else if (filterMode === 'new') {
 			filterClause = 'is:new';
+		} else if (filterMode === 'due+new') {
+			filterClause = '(is:due or is:new)';
 		}
 
-		const parts = [deckName, filterClause].filter(Boolean);
-		return parts.length > 0 ? parts.join(' ') : 'is:due';
+		const parts = [deckName, filterClause, suspendedClause].filter(Boolean);
+		return parts.length > 0 ? parts.join(' ') : (shouldExcludeSuspended ? '-is:suspended' : 'is:due');
+	}
+
+	private calculateSessionCounts(): { new: number; learn: number; review: number; early?: number } {
+		let newCount = 0;
+		let learnCount = 0;
+		let reviewCount = 0;
+		let earlyCount = 0;
+
+		for (let i = this.currentIndex; i < this.cards.length; i++) {
+			const c = this.cards[i];
+			if (!c) continue;
+			if (c.queue === 1 || c.queue === 3) {
+				learnCount++;
+			} else if (this.dueCardIds.has(c.cardId)) {
+				reviewCount++;
+			} else if (c.queue === 0 || c.type === 0) {
+				newCount++;
+			} else if (c.queue === 2 || c.type === 2) {
+				earlyCount++;
+			} else {
+				reviewCount++;
+			}
+		}
+
+		return { new: newCount, learn: learnCount, review: reviewCount, early: earlyCount };
+	}
+
+	private async updateCounts(deckName?: string): Promise<void> {
+		if (!this.isLiveSync && (this.config.query || (this.isLearningMode && !this.config.deck))) {
+			this.currentCounts = this.calculateSessionCounts();
+			this.updateCountsDisplay();
+			return;
+		}
+
+		const targetDeck = this.config.deck || deckName || this.cards[0]?.deckName;
+
+		if (targetDeck) {
+			try {
+				const statsRecord = await this.client.getDeckStats([targetDeck]);
+				if (statsRecord && typeof statsRecord === 'object') {
+					const statList = Object.values(statsRecord);
+					const deckStat = statList.find(s => s.name?.toLowerCase() === targetDeck.toLowerCase()) ||
+						statList.find(s => targetDeck.toLowerCase().endsWith(`::${s.name?.toLowerCase()}`)) ||
+						statList[0];
+					if (deckStat) {
+						this.currentCounts = {
+							new: deckStat.new_count ?? (deckStat as unknown as { new?: number }).new ?? 0,
+							learn: deckStat.learn_count ?? (deckStat as unknown as { learn?: number }).learn ?? 0,
+							review: deckStat.review_count ?? (deckStat as unknown as { due_count?: number; review?: number }).due_count ?? (deckStat as unknown as { review?: number }).review ?? 0,
+						};
+						this.updateCountsDisplay();
+						return;
+					}
+				}
+			} catch {
+				// Fallback to session counts on failure
+			}
+		}
+		this.currentCounts = this.calculateSessionCounts();
+		this.updateCountsDisplay();
+	}
+
+	public sortCardsForLearningMode(cards: AnkiCardInfo[], dueCardIds: Set<number>, order: LearningOrder): AnkiCardInfo[] {
+		return sortCardsForLearningMode(cards, dueCardIds, order);
+	}
+
+	private getCardStatusPill(card: AnkiCardInfo): { label: string; cls: string; title: string } {
+		return getCardStatusPill(card, this.dueCardIds);
+	}
+
+	private sortReviewsFirst(cards: AnkiCardInfo[], randomize: boolean = false): AnkiCardInfo[] {
+		const reviews: AnkiCardInfo[] = [];
+		const newCards: AnkiCardInfo[] = [];
+
+		for (const card of cards) {
+			const isReview = (card.type !== undefined && card.type > 0) || 
+			                 (card.queue !== undefined && card.queue > 0) || 
+			                 ((card.reviews ?? card.reps ?? 0) > 0);
+			if (isReview) {
+				reviews.push(card);
+			} else {
+				newCards.push(card);
+			}
+		}
+
+		if (randomize) {
+			reviews.sort(() => Math.random() - 0.5);
+			newCards.sort(() => Math.random() - 0.5);
+		}
+
+		return [...reviews, ...newCards];
 	}
 
 	public async loadCards(): Promise<void> {
 		const requestId = ++this.loadRequestId;
-		if (this.config.select || (!this.config.deck && !this.config.query)) {
+		const targetCardId = this.config.card ?? this.config.cardId;
+		if (this.config.select || (!this.config.deck && !this.config.query && !targetCardId && !this.isLiveSync)) {
+			this.stopLiveSyncWatcher();
 			await this.renderDeckPicker(requestId);
 			return;
 		}
@@ -129,11 +652,104 @@ export class DeckPlayer {
 		this.sessionStats = { again: 0, hard: 0, good: 0, easy: 0 };
 		this.renderLoading();
 
-		try {
-			const query = this.buildQuery();
-			const cardIds = await this.client.findCards(query);
+		if (this.isLiveSync) {
+			this.startLiveSyncWatcher();
+			await this.loadLiveCards(requestId);
+			return;
+		} else {
+			this.stopLiveSyncWatcher();
+		}
 
-			if (!cardIds || cardIds.length === 0) {
+		try {
+			const orderMode = this.config.order ?? this.settings.cardOrder;
+			const shouldRandomize = this.config.randomize ?? this.settings.randomizeCards;
+			const limit = this.config.limit ?? this.settings.defaultLimit;
+			const filterMode = this.config.filter ?? this.settings.defaultFilter;
+			const shouldExcludeSuspended = this.config.excludeSuspended ?? this.settings.excludeSuspended;
+			const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
+			const deckName = this.config.deck ? `deck:"${this.config.deck}"` : '';
+
+			let selectedIds: number[] = [];
+
+			if (targetCardId) {
+				selectedIds = [targetCardId];
+			} else if (orderMode === 'reviews-first' && !this.config.query && (filterMode === 'due+new' || filterMode === 'all')) {
+				const dueParts = [deckName, 'is:due', suspendedClause].filter(Boolean);
+				const dueQuery = dueParts.join(' ');
+				const dueIds = await this.client.findCards(dueQuery);
+
+				let pickedDue = dueIds;
+				if (shouldRandomize) {
+					pickedDue = [...dueIds].sort(() => Math.random() - 0.5);
+				}
+				if (limit > 0 && pickedDue.length > limit) {
+					pickedDue = pickedDue.slice(0, limit);
+				}
+
+				selectedIds.push(...pickedDue);
+
+				const remainingLimit = limit > 0 ? limit - selectedIds.length : 0;
+				if (remainingLimit > 0 || limit <= 0) {
+					const newParts = [deckName, 'is:new', suspendedClause].filter(Boolean);
+					const newQuery = newParts.join(' ');
+					const newIds = await this.client.findCards(newQuery);
+
+					let pickedNew = newIds;
+					if (shouldRandomize) {
+						pickedNew = [...newIds].sort(() => Math.random() - 0.5);
+					}
+					if (limit > 0 && pickedNew.length > remainingLimit) {
+						pickedNew = pickedNew.slice(0, remainingLimit);
+					}
+					selectedIds.push(...pickedNew);
+				}
+			} else {
+				const query = this.buildQuery();
+				let cardIds = await this.client.findCards(query);
+
+				// Fallback 1: If 0 cards and query excluded suspended, retry without -is:suspended
+				if ((!cardIds || cardIds.length === 0) && query.includes('-is:suspended')) {
+					const queryWithoutSuspended = query.replace(/\s*-is:suspended\b/g, '').trim();
+					if (queryWithoutSuspended) {
+						const fallbackIds = await this.client.findCards(queryWithoutSuspended);
+						if (fallbackIds && fallbackIds.length > 0) {
+							cardIds = fallbackIds;
+						}
+					}
+				}
+
+				// Fallback 2: If 0 cards and query was a tag search (e.g. tag:"Heart"), try wildcard tag search (tag:*Heart*)
+				if (!cardIds || cardIds.length === 0) {
+					const tagMatch = query.match(/^tag:"?([^"*]+)"?/);
+					if (tagMatch?.[1]) {
+						const tagName = tagMatch[1];
+						const wildcardQuery = `tag:*${tagName}*`;
+						const fallbackIds = await this.client.findCards(wildcardQuery);
+						if (fallbackIds && fallbackIds.length > 0) {
+							cardIds = fallbackIds;
+						}
+					}
+				}
+
+				if (!cardIds || cardIds.length === 0) {
+					if (requestId !== this.loadRequestId) return;
+					this.cards = [];
+					this.isLoading = false;
+					this.renderEmpty();
+					return;
+				}
+
+				selectedIds = cardIds;
+				if (shouldRandomize && orderMode !== 'reviews-first') {
+					selectedIds = [...cardIds].sort(() => Math.random() - 0.5);
+				}
+
+				if (limit > 0 && selectedIds.length > limit) {
+					selectedIds = selectedIds.slice(0, limit);
+				}
+			}
+
+			if (selectedIds.length === 0) {
 				if (requestId !== this.loadRequestId) return;
 				this.cards = [];
 				this.isLoading = false;
@@ -141,22 +757,41 @@ export class DeckPlayer {
 				return;
 			}
 
-			let selectedIds = cardIds;
-			const shouldRandomize = this.config.randomize ?? this.settings.randomizeCards;
-			if (shouldRandomize) {
-				selectedIds = [...cardIds].sort(() => Math.random() - 0.5);
-			}
-
-			const limit = this.config.limit ?? this.settings.defaultLimit;
-			if (limit > 0 && selectedIds.length > limit) {
-				selectedIds = selectedIds.slice(0, limit);
-			}
-
 			const cards = await this.client.getCardsInfo(selectedIds);
 
 			if (requestId !== this.loadRequestId) return;
-			this.cards = cards;
+
+			let finalCards = cards;
+			if (this.isLearningMode && !this.isLiveSync) {
+				let dueCardIds = new Set<number>();
+				try {
+					const baseQuery = this.config.query
+						? this.config.query
+						: (this.config.deck ? `deck:"${this.config.deck}"` : '');
+					const suspendedClause = shouldExcludeSuspended ? '-is:suspended' : '';
+					const dueQuery = [baseQuery, 'is:due', suspendedClause].filter(Boolean).join(' ');
+					const dueIds = await this.client.findCards(dueQuery);
+					if (dueIds && dueIds.length > 0) {
+						dueCardIds = new Set(dueIds);
+					}
+				} catch {
+					// Fallback to empty
+				}
+				this.dueCardIds = dueCardIds;
+				const learningOrder = this.config.learningOrder ?? this.settings.learningOrder ?? 'due-new-future';
+				finalCards = this.sortCardsForLearningMode(cards, dueCardIds, learningOrder);
+			} else if (orderMode === 'reviews-first') {
+				finalCards = this.sortReviewsFirst(cards, shouldRandomize);
+			} else if (shouldRandomize) {
+				finalCards = [...cards].sort(() => Math.random() - 0.5);
+			}
+
+			this.cards = finalCards;
+			this.hasAcknowledgedEarlyReviews = false;
 			this.isLoading = false;
+
+			const activeDeck = this.config.deck || this.cards[0]?.deckName;
+			await this.updateCounts(activeDeck);
 
 			if (this.cards.length === 0) {
 				this.renderEmpty();
@@ -169,16 +804,730 @@ export class DeckPlayer {
 			if (requestId !== this.loadRequestId) return;
 			this.isLoading = false;
 			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				if (this.isLiveSync) {
+					this.cards = [];
+					this.renderEmptyLive();
+					return;
+				}
+			}
 			this.renderError(msg);
 		}
 	}
 
+	private async loadLiveCards(requestId: number = this.loadRequestId): Promise<void> {
+		try {
+			let currentCard = await this.client.guiCurrentCard().catch(() => null);
+			const chosenDeck = this.config.deck;
+
+			if (!currentCard && chosenDeck) {
+				try {
+					await this.client.guiDeckReview(chosenDeck);
+					currentCard = await this.client.guiCurrentCard().catch(() => null);
+				} catch {
+					// Ignore
+				}
+			}
+
+			if (requestId !== this.loadRequestId) return;
+			this.isLoading = false;
+
+			if (!currentCard) {
+				this.cards = [];
+				this.renderEmptyLive();
+				return;
+			}
+
+			this.cards = [currentCard];
+			this.currentIndex = 0;
+
+			const ankiDeck = currentCard.deckName;
+			// The card's deck is a subdeck when Anki is reviewing a parent deck, so match the hierarchy.
+			// The chosen deck is never overwritten with the card's deck.
+			const isMismatch = Boolean(chosenDeck && ankiDeck && !isDeckOrSubdeck(ankiDeck, chosenDeck));
+
+			await this.updateCounts(chosenDeck || ankiDeck);
+
+			if (isMismatch) {
+				this.hasStarted = false;
+				this.renderStartScreenLive(currentCard, chosenDeck);
+			} else if (!this.hasStarted && !chosenDeck) {
+				this.renderStartScreenLive(currentCard);
+			} else {
+				this.hasStarted = true;
+				void this.renderCurrentCard();
+			}
+		} catch (err: unknown) {
+			if (requestId !== this.loadRequestId) return;
+			this.isLoading = false;
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes('not currently active')) {
+				this.cards = [];
+				this.renderEmptyLive();
+				return;
+			}
+			this.renderError(msg);
+		}
+	}
+
+	private renderEmptyLive() {
+		this.container.empty();
+		this.renderHeader('Live reviewer');
+
+		const body = this.container.createDiv({ cls: 'anki-embed-empty' });
+		body.createDiv({ text: '⚡ Live sync: Anki desktop is not currently in review mode.' });
+
+		const hint = body.createDiv({ cls: 'anki-embed-empty-hint', attr: { style: 'margin-top: 8px; font-size: 0.9em; opacity: 0.8;' } });
+		hint.setText(this.config.deck
+			? `Start reviewing "${this.config.deck}" in Anki or choose an option below:`
+			: 'Open a deck for review in Anki desktop to mirror it here, or switch to offline mode:');
+
+		const actions = body.createDiv({ cls: 'anki-embed-actions', attr: { style: 'margin-top: 14px; justify-content: center; gap: 8px; flex-wrap: wrap;' } });
+		if (this.config.deck) {
+			const startAnkiBtn = actions.createEl('button', {
+				cls: 'anki-embed-flip-btn',
+				text: `▶️ Review "${this.config.deck}" in Anki`,
+			});
+			startAnkiBtn.onclick = async () => {
+				if (this.config.deck) {
+					try {
+						await this.client.guiDeckReview(this.config.deck);
+						void this.loadCards();
+					} catch (err: unknown) {
+						const msg = err instanceof Error ? err.message : String(err);
+						new Notice(`Could not launch deck in Anki: ${msg}`);
+					}
+				}
+			};
+		}
+
+		const refreshBtn = actions.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: '🔄 Check Anki now',
+		});
+		refreshBtn.onclick = () => {
+			void this.loadCards();
+		};
+
+		const toggleOffBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: 'Switch to offline deck mode',
+		});
+		toggleOffBtn.onclick = () => {
+			this.config.live = false;
+			this.hasStarted = true;
+			void this.loadCards();
+		};
+
+		const pickerBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: '↩ Back to deck selection',
+		});
+		pickerBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
+	}
+
+	private renderStartScreenLive(currentCard: AnkiCardInfo, chosenDeck?: string) {
+		this.container.empty();
+		const ankiDeck = currentCard.deckName || 'Current deck';
+		const hasMismatch = Boolean(chosenDeck && currentCard.deckName && !isDeckOrSubdeck(currentCard.deckName, chosenDeck));
+		this.renderHeader(chosenDeck || ankiDeck);
+
+		const startDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
+
+		if (hasMismatch && chosenDeck) {
+			const iconBadge = startDiv.createDiv({ cls: 'anki-mismatch-icon-badge' });
+			setIcon(iconBadge, 'alert-circle');
+
+			startDiv.createEl('h3', { cls: 'anki-mismatch-title', text: 'Anki desktop has a different deck open' });
+
+			const shortAnki = ankiDeck.split('::').pop() ?? ankiDeck;
+			const shortChosen = chosenDeck.split('::').pop() ?? chosenDeck;
+
+			const desc = startDiv.createDiv({ cls: 'anki-deck-mismatch-desc' });
+
+			const ankiRow = desc.createDiv({ cls: 'anki-deck-mismatch-item is-anki' });
+			const ankiMeta = ankiRow.createDiv({ cls: 'anki-mismatch-meta' });
+			ankiMeta.createSpan({ cls: 'anki-mismatch-tag is-red', text: 'Anki app' });
+			ankiMeta.createSpan({ cls: 'anki-deck-mismatch-label', text: 'Active deck' });
+			ankiRow.createSpan({
+				cls: 'anki-deck-mismatch-value is-anki',
+				text: shortAnki,
+				attr: { title: ankiDeck },
+			});
+
+			desc.createDiv({ cls: 'anki-deck-mismatch-divider' });
+
+			const chosenRow = desc.createDiv({ cls: 'anki-deck-mismatch-item' });
+			const chosenMeta = chosenRow.createDiv({ cls: 'anki-mismatch-meta' });
+			chosenMeta.createSpan({ cls: 'anki-mismatch-tag', text: 'Obsidian' });
+			chosenMeta.createSpan({ cls: 'anki-deck-mismatch-label', text: 'Selected deck' });
+			chosenRow.createSpan({
+				cls: 'anki-deck-mismatch-value',
+				text: shortChosen,
+				attr: { title: chosenDeck },
+			});
+
+			const actions = startDiv.createDiv({ cls: 'anki-mismatch-actions' });
+
+			const openMineBtn = actions.createEl('button', {
+				cls: 'anki-embed-flip-btn anki-mismatch-btn',
+				text: `Open ${shortChosen} in Anki`,
+				attr: { title: `Switch Anki desktop to ${chosenDeck} and sync` },
+			});
+			openMineBtn.onclick = async () => {
+				try {
+					await this.client.guiDeckReview(chosenDeck);
+					this.hasStarted = true;
+					void this.loadCards();
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					new Notice(`Could not open deck in Anki: ${msg}`);
+				}
+			};
+
+			const startAnkiBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary anki-mismatch-btn',
+				text: `Switch to ${shortAnki}`,
+				attr: { title: `Sync with the deck Anki desktop is reviewing (${ankiDeck})` },
+			});
+			startAnkiBtn.onclick = () => {
+				this.config.deck = ankiDeck;
+				this.onDeckChange?.(ankiDeck);
+				this.hasStarted = true;
+				void this.renderCurrentCard();
+			};
+
+			const remoteBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary anki-mismatch-btn',
+				text: `Review ${shortChosen} offline`,
+				attr: { title: `Review ${chosenDeck} offline in Obsidian` },
+			});
+			remoteBtn.onclick = () => {
+				this.config.live = false;
+				this.config.deck = chosenDeck;
+				this.hasStarted = true;
+				this.onDeckChange?.(chosenDeck);
+				void this.loadCards();
+			};
+
+			const pickerBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary anki-mismatch-btn anki-mismatch-back-btn',
+				text: 'Back to deck selection',
+			});
+			pickerBtn.onclick = () => {
+				this.resetToDeckPicker();
+			};
+		} else {
+			startDiv.createDiv({
+				cls: 'anki-embed-completed-icon',
+				text: '⚡',
+			});
+			startDiv.createEl('h3', { text: 'Connected to Anki live review' });
+			const activeDeckTitle = chosenDeck || ankiDeck;
+			startDiv.createEl('p', { text: `Active deck: ${activeDeckTitle}. Obsidian and Anki desktop will stay synchronized.` });
+
+			const actions = startDiv.createDiv({ cls: 'anki-start-actions' });
+
+			const startBtn = actions.createEl('button', {
+				cls: 'anki-embed-flip-btn anki-start-btn',
+				text: 'Start synced session',
+			});
+			startBtn.onclick = () => {
+				this.hasStarted = true;
+				void this.renderCurrentCard();
+			};
+
+			const changeBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary anki-start-btn',
+				text: 'Switch to offline deck mode',
+			});
+			changeBtn.onclick = () => {
+				this.config.live = false;
+				void this.loadCards();
+			};
+
+			const pickerBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary anki-start-btn anki-start-back-btn',
+				text: 'Back to deck selection',
+			});
+			pickerBtn.onclick = () => {
+				this.resetToDeckPicker();
+			};
+
+			const hint = startDiv.createDiv({ cls: 'anki-embed-shortcut-hint', attr: { style: 'margin-top: 16px;' } });
+			hint.createSpan({ text: 'Shortcut: Press Space to start' });
+			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
+		}
+	}
+
+	private startLiveSyncWatcher() {
+		this.stopLiveSyncWatcher();
+		if (!this.isLiveSync) return;
+
+		this.liveSyncTimer = window.setInterval(() => {
+			void (async () => {
+				if (!this.isLiveSync || this.isLoading || !this.hasStarted || this.isPollingLiveCard || this.isReviewingLiveCard) return;
+				if (Date.now() - this.lastUserActionTimestamp < 1500) return;
+				if (!this.container.isConnected) {
+					this.stopLiveSyncWatcher();
+					return;
+				}
+				this.isPollingLiveCard = true;
+				try {
+					const currentCard = await this.client.guiCurrentCard();
+					if (!currentCard) {
+						if (this.cards.length > 0) {
+							this.cards = [];
+							this.renderCompleted();
+						}
+						return;
+					}
+					await this.applyPolledLiveCard(currentCard);
+				} catch {
+					// Ignore
+				} finally {
+					this.isPollingLiveCard = false;
+				}
+			})();
+		}, 600);
+
+		this.onWindowFocusHandler = () => {
+			void (async () => {
+				if (!this.isLiveSync || this.isLoading || !this.hasStarted || this.isPollingLiveCard || this.isReviewingLiveCard) return;
+				if (Date.now() - this.lastUserActionTimestamp < 1000) return;
+				this.isPollingLiveCard = true;
+				try {
+					const currentCard = await this.client.guiCurrentCard();
+					if (currentCard) {
+						await this.applyPolledLiveCard(currentCard);
+					}
+				} catch {
+					// Ignore
+				} finally {
+					this.isPollingLiveCard = false;
+				}
+			})();
+		};
+		window.addEventListener('focus', this.onWindowFocusHandler);
+	}
+
+	/** Mirror a card polled from Anki desktop, pausing if Anki has moved outside the chosen deck. */
+	private async applyPolledLiveCard(currentCard: AnkiCardInfo): Promise<void> {
+		const chosenDeck = this.config.deck;
+		if (chosenDeck && currentCard.deckName && !isDeckOrSubdeck(currentCard.deckName, chosenDeck)) {
+			this.cards = [currentCard];
+			this.currentIndex = 0;
+			this.showingAnswer = false;
+			this.hasStarted = false;
+			this.renderStartScreenLive(currentCard, chosenDeck);
+			return;
+		}
+		if (currentCard.cardId !== this.cards[this.currentIndex]?.cardId) {
+			this.cards = [currentCard];
+			this.currentIndex = 0;
+			this.showingAnswer = false;
+			void this.updateCounts(chosenDeck || currentCard.deckName);
+			await this.renderCurrentCard();
+		}
+	}
+
+	/**
+	 * The deck Anki desktop has open, whether it is reviewing or on the deck's overview screen.
+	 * Falls back to the deck of the card being reviewed. Null if Anki can't be reached.
+	 */
+	/** Make Anki desktop start reviewing the deck. Returns false (after a notice) on failure. */
+	private async reviewDeckInAnki(deck: string): Promise<boolean> {
+		try {
+			await this.client.guiDeckReview(deck);
+			return true;
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Could not open deck in Anki: ${msg}`);
+			return false;
+		}
+	}
+
+	private async getAnkiOpenDeck(): Promise<string | null> {
+		try {
+			const deck = await this.client.getCurrentDeckName();
+			if (deck) return deck;
+		} catch {
+			// Fall through to the card being reviewed
+		}
+		const card = await this.client.guiCurrentCard().catch(() => null);
+		return card?.deckName ?? null;
+	}
+
+	/**
+	 * Start the deck chosen in the deck picker. Goes live when Anki desktop is already reviewing it;
+	 * when Anki is reviewing a different deck, asks how to resolve the conflict.
+	 */
+	private async startDeckFromPicker(deck: string): Promise<void> {
+		const begin = (live: boolean, deckToLoad: string = deck) => {
+			this.config.deck = deckToLoad;
+			this.config.select = false;
+			this.config.live = live;
+			this.hasStarted = live;
+			this.onDeckChange?.(deckToLoad);
+			void this.loadCards();
+		};
+
+		const ankiDeck = await this.getAnkiOpenDeck();
+
+		if (!ankiDeck) {
+			// Anki isn't reachable or its open deck can't be determined: keep the current mode.
+			begin(this.isLiveSync);
+			return;
+		}
+		if (isSameDeck(ankiDeck, deck)) {
+			begin(true);
+			return;
+		}
+
+		this.confirmLiveDeckSwitch(deck, ankiDeck, {
+			title: 'Anki is reviewing a different deck',
+			description: 'You picked a different deck from the one open in Anki desktop. Live sync can only mirror one deck.',
+			myDeckLabel: 'Selected deck:',
+			onLive: () => begin(true, ankiDeck),
+			onLiveMine: async () => {
+				if (await this.reviewDeckInAnki(deck)) begin(true);
+			},
+			onOffline: () => begin(false),
+		});
+	}
+
+	/**
+	 * Turn on live sync from an offline session. If Anki desktop is reviewing a deck outside the
+	 * current one, ask before switching decks.
+	 */
+	private async switchToLiveMode(targetDeck?: string): Promise<void> {
+		const myDeck = targetDeck ?? this.config.deck;
+
+		const goLive = (deck: string | undefined = myDeck) => {
+			if (deck && deck !== this.config.deck) {
+				this.config.deck = deck;
+				this.onDeckChange?.(deck);
+			}
+			this.config.live = true;
+			this.config.select = false;
+			this.hasStarted = true;
+			void this.loadCards();
+		};
+
+		const ankiDeck = await this.getAnkiOpenDeck();
+		if (!myDeck || !ankiDeck || isSameDeck(ankiDeck, myDeck)) {
+			// Anki's deck is unknown (loadLiveCards opens ours or shows a connection error),
+			// or Anki already has our deck open.
+			goLive();
+			return;
+		}
+
+		this.confirmLiveDeckSwitch(myDeck, ankiDeck, {
+			onLive: () => goLive(ankiDeck),
+			onLiveMine: async () => {
+				if (await this.reviewDeckInAnki(myDeck)) goLive();
+			},
+			// Already reviewing offline: keep the current session as it is.
+			onOffline: () => {},
+		});
+	}
+
+	private confirmLiveDeckSwitch(
+		myDeck: string,
+		ankiDeck: string,
+		handlers: {
+			onLive: () => void;
+			onLiveMine: () => void | Promise<void>;
+			onOffline: () => void;
+			title?: string;
+			description?: string;
+			myDeckLabel?: string;
+		},
+	): void {
+		this.container.querySelector('.anki-mode-select-overlay')?.remove();
+
+		const overlay = this.container.createDiv({ cls: 'anki-mode-select-overlay' });
+		const modal = overlay.createDiv({ cls: 'anki-mode-select-modal' });
+
+		const close = () => {
+			document.removeEventListener('keydown', onEscKey);
+			overlay.remove();
+		};
+		const onEscKey = (evt: KeyboardEvent) => {
+			if (evt.key === 'Escape') {
+				evt.preventDefault();
+				evt.stopPropagation();
+				close();
+			}
+		};
+		document.addEventListener('keydown', onEscKey);
+		overlay.onclick = (e) => {
+			if (e.target === overlay) close();
+		};
+
+		const shortMine = myDeck.split('::').pop() ?? myDeck;
+		const shortAnki = ankiDeck.split('::').pop() ?? ankiDeck;
+
+		const header = modal.createDiv({ cls: 'anki-mode-warning-header' });
+		header.createSpan({ text: '⚠️' });
+		header.createSpan({ text: handlers.title ?? 'Anki is reviewing a different deck' });
+
+		modal.createEl('p', {
+			cls: 'anki-mode-select-desc',
+			text: handlers.description ?? 'Live sync mirrors the deck Anki desktop is reviewing. Turning it on now will switch decks.',
+		});
+
+		const box = modal.createDiv({ cls: 'anki-mode-warning-box' });
+		const row1 = box.createDiv({ cls: 'anki-mode-warning-row' });
+		row1.createSpan({ cls: 'anki-mode-warning-label', text: handlers.myDeckLabel ?? 'Reviewing here:' });
+		row1.createSpan({ cls: 'anki-mode-warning-value', text: myDeck });
+		const row2 = box.createDiv({ cls: 'anki-mode-warning-row' });
+		row2.createSpan({ cls: 'anki-mode-warning-label', text: 'Anki app deck:' });
+		row2.createSpan({ cls: 'anki-mode-warning-value', text: ankiDeck });
+
+		const actions = modal.createDiv({ cls: 'anki-mode-select-actions' });
+
+		const liveBtn = actions.createEl('button', {
+			cls: 'mod-cta',
+			text: `Live: ${shortAnki}`,
+			attr: { title: `Live sync with ${ankiDeck}, the deck open in Anki desktop` },
+		});
+		liveBtn.onclick = () => {
+			close();
+			handlers.onLive();
+		};
+
+		const liveMineBtn = actions.createEl('button', {
+			text: `Live: ${shortMine} (switch Anki)`,
+			attr: { title: `Switch Anki desktop to ${myDeck} and live sync with it` },
+		});
+		liveMineBtn.onclick = () => {
+			close();
+			void handlers.onLiveMine();
+		};
+
+		const offlineBtn = actions.createEl('button', {
+			text: `Offline: ${shortMine}`,
+			attr: { title: `Review ${myDeck} in Obsidian without touching Anki desktop` },
+		});
+		offlineBtn.onclick = () => {
+			close();
+			handlers.onOffline();
+		};
+
+		const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+		cancelBtn.onclick = () => close();
+	}
+
+	public stopLiveSyncWatcher() {
+		if (this.liveSyncTimer !== null) {
+			window.clearInterval(this.liveSyncTimer);
+			this.liveSyncTimer = null;
+		}
+		if (this.onWindowFocusHandler) {
+			window.removeEventListener('focus', this.onWindowFocusHandler);
+			this.onWindowFocusHandler = null;
+		}
+	}
+
+	public stopCardTimer() {
+		if (this.cardTimerInterval !== null) {
+			window.clearInterval(this.cardTimerInterval);
+			this.cardTimerInterval = null;
+		}
+	}
+
+	private getCardElapsedSec(): number {
+		if (this.isTimerPaused) {
+			return this.timerPausedElapsedMs / 1000;
+		}
+		if (this.cardStartTime > 0) {
+			return (Date.now() - this.cardStartTime) / 1000;
+		}
+		return 0;
+	}
+
+	private toggleTimerPause(timerPill: HTMLElement, clockEl: HTMLElement, timerTextEl: HTMLElement, streakEl: HTMLElement) {
+		const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+
+		if (!this.isTimerPaused) {
+			this.isTimerPaused = true;
+			this.timerPausedElapsedMs = this.cardStartTime > 0 ? (Date.now() - this.cardStartTime) : 0;
+			this.stopCardTimer();
+			timerPill.removeClass('is-normal');
+			timerPill.removeClass('is-warning');
+			timerPill.removeClass('is-overtime');
+			timerPill.addClass('is-paused');
+			clockEl.setText('⏸️');
+			timerPill.setAttribute('title', 'Timer paused (click to resume)');
+			timerTextEl.setText(`${(this.timerPausedElapsedMs / 1000).toFixed(1)}s`);
+		} else {
+			this.isTimerPaused = false;
+			this.cardStartTime = Date.now() - this.timerPausedElapsedMs;
+			timerPill.removeClass('is-paused');
+			clockEl.setText('⏱️');
+			timerPill.setAttribute('title', `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s (click to pause)`);
+			this.startCardTimer(timerPill, clockEl, timerTextEl, streakEl);
+		}
+	}
+
+	private formatTimerMmSs(seconds: number): string {
+		const totalSec = Math.floor(seconds);
+		const m = Math.floor(totalSec / 60);
+		const s = totalSec % 60;
+		return `${m}:${s < 10 ? '0' : ''}${s}`;
+	}
+
+	private ensureCardTimerRunning(timerEl: HTMLElement): void {
+		if (this.cardTimerInterval === null) {
+			this.cardTimerInterval = window.setInterval(() => {
+				if (!this.container.isConnected) {
+					this.stopCardTimer();
+					return;
+				}
+				if (this.isTimerPaused) return;
+				const elapsedSec = this.getCardElapsedSec();
+				timerEl.setText(this.formatTimerMmSs(elapsedSec));
+			}, 250);
+		}
+	}
+
+	private startCardTimer(timerPill: HTMLElement, clockEl: HTMLElement, timerTextEl: HTMLElement, streakEl: HTMLElement) {
+		this.stopCardTimer();
+		if (this.isTimerPaused) {
+			return;
+		}
+		const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+
+		this.cardTimerInterval = window.setInterval(() => {
+			if (!this.container.isConnected) {
+				this.stopCardTimer();
+				return;
+			}
+			if (this.isTimerPaused) {
+				return;
+			}
+
+			const elapsedSec = this.getCardElapsedSec();
+			timerTextEl.setText(`${elapsedSec.toFixed(1)}s`);
+			if (this.footerEl) {
+				const fsTimer = this.footerEl.querySelector<HTMLElement>('.anki-fs-timer');
+				if (fsTimer) {
+					fsTimer.setText(this.formatTimerMmSs(elapsedSec));
+				}
+			}
+
+			if (elapsedSec >= limitSec) {
+				timerPill.removeClass('is-normal');
+				timerPill.removeClass('is-warning');
+				timerPill.removeClass('is-paused');
+				timerPill.addClass('is-overtime');
+
+				if (!this.timerExceededForCurrentCard) {
+					this.timerExceededForCurrentCard = true;
+					this.timeStreak = 0;
+					streakEl.setText('⚡ 0');
+				}
+			} else if (elapsedSec >= warningSec) {
+				timerPill.removeClass('is-normal');
+				timerPill.removeClass('is-overtime');
+				timerPill.removeClass('is-paused');
+				timerPill.addClass('is-warning');
+			} else {
+				timerPill.removeClass('is-warning');
+				timerPill.removeClass('is-overtime');
+				timerPill.removeClass('is-paused');
+				timerPill.addClass('is-normal');
+			}
+		}, 100);
+	}
+
+	public destroy(): void {
+		if (typeof document !== 'undefined') {
+			document.removeEventListener('keydown', this.documentKeydownHandler);
+			document.removeEventListener('fullscreenchange', this.fullscreenChangeHandler);
+		}
+		this.closeFullscreenSideNote();
+		this.closeActiveLinksDropdown();
+		this.stopLiveSyncWatcher();
+		this.stopCardTimer();
+		this.isTimerPaused = false;
+		this.timerPausedElapsedMs = 0;
+		this.stopGamepadLoop();
+		this.stopWatchingVault();
+	}
+
+	/**
+	 * Linked notes are cached per card. Drop that cache whenever a note's properties change or a
+	 * note is deleted, so the links button and dropdown pick up newly tagged or linked notes.
+	 */
+	private watchVaultForLinkChanges(): void {
+		if (!this.app || this.vaultEventRefs.length > 0) return;
+		const onChange = () => this.scheduleLinkedNotesRefresh();
+		this.vaultEventRefs.push(
+			this.app.metadataCache.on('changed', onChange),
+			this.app.metadataCache.on('deleted', onChange),
+		);
+	}
+
+	private stopWatchingVault(): void {
+		if (this.app) {
+			for (const ref of this.vaultEventRefs) this.app.metadataCache.offref(ref);
+		}
+		this.vaultEventRefs = [];
+		if (this.linksRefreshTimer !== null) {
+			window.clearTimeout(this.linksRefreshTimer);
+			this.linksRefreshTimer = null;
+		}
+	}
+
+	private scheduleLinkedNotesRefresh(): void {
+		// Embedded players are never destroyed explicitly: stop listening once removed from the page.
+		if (!this.container.isConnected) {
+			this.stopWatchingVault();
+			return;
+		}
+		if (this.linksRefreshTimer !== null) window.clearTimeout(this.linksRefreshTimer);
+		this.linksRefreshTimer = window.setTimeout(() => {
+			this.linksRefreshTimer = null;
+			this.linkedNotesCache.clear();
+			const card = this.cards[this.currentIndex];
+			if (!card) return;
+			void this.scanVaultForCard(card.cardId).then(() => {
+				this.updateLinksButton();
+				this.refreshActiveLinksDropdown?.();
+			});
+		}, 300);
+	}
+
 	public resetToDeckPicker(): void {
+		this.closeFullscreenSideNote();
+		this.closeActiveLinksDropdown();
+		this.stopLiveSyncWatcher();
+		this.stopCardTimer();
+		this.isTimerPaused = false;
+		this.timerPausedElapsedMs = 0;
+		this.timeStreak = 0;
+		this.timerExceededForCurrentCard = false;
+		this.reviewHistory = [];
 		this.hasStarted = false;
 		this.currentIndex = 0;
 		this.showingAnswer = false;
 		this.sessionStats = { again: 0, hard: 0, good: 0, easy: 0 };
 		this.cards = [];
+		this.headerEl = null;
+		this.cardEl = null;
+		this.footerEl = null;
+		this.currentShadowRoot = null;
+		this.currentCardContainer = null;
+		this.currentModelName = null;
+		this.currentFontScale = null;
+		this.preparedQuestionCache.clear();
+		this.preparedAnswerCache.clear();
 		this.config.select = true;
 		this.config.deck = undefined;
 		this.config.query = undefined;
@@ -186,12 +1535,471 @@ export class DeckPlayer {
 		void this.renderDeckPicker();
 	}
 
+	private initGamepad(): void {
+		const isGamepadEnabled = this.config.remote ?? this.settings.enableGamepad;
+		if (!isGamepadEnabled || typeof window === 'undefined') return;
+
+		this.onGamepadConnectedHandler = (e: GamepadEvent) => {
+			this.connectedGamepadName = e.gamepad.id;
+			new Notice(`🎮 Connected: ${e.gamepad.id.slice(0, 30)}`);
+			this.updateGamepadBadge();
+		};
+		this.onGamepadDisconnectedHandler = () => {
+			this.connectedGamepadName = null;
+			new Notice('🎮 Controller disconnected');
+			this.updateGamepadBadge();
+		};
+
+		window.addEventListener('gamepadconnected', this.onGamepadConnectedHandler);
+		window.addEventListener('gamepaddisconnected', this.onGamepadDisconnectedHandler);
+
+		this.gamepadInterval = window.setInterval(() => {
+			this.pollGamepadState();
+		}, 50);
+	}
+
+	private stopGamepadLoop(): void {
+		if (this.gamepadInterval !== null) {
+			window.clearInterval(this.gamepadInterval);
+			this.gamepadInterval = null;
+		}
+		if (this.onGamepadConnectedHandler) {
+			window.removeEventListener('gamepadconnected', this.onGamepadConnectedHandler);
+			this.onGamepadConnectedHandler = null;
+		}
+		if (this.onGamepadDisconnectedHandler) {
+			window.removeEventListener('gamepaddisconnected', this.onGamepadDisconnectedHandler);
+			this.onGamepadDisconnectedHandler = null;
+		}
+	}
+
+	private updateGamepadBadge(): void {
+		const badges = this.container.querySelectorAll<HTMLElement>('.anki-embed-gamepad-badge');
+		badges.forEach((badge) => {
+			if (this.connectedGamepadName) {
+				badge.addClass('is-connected');
+				badge.setAttribute('title', `🎮 Controller: ${this.connectedGamepadName} (click to customize buttons)`);
+				badge.textContent = '🎮 Remote connected';
+			} else {
+				badge.removeClass('is-connected');
+				badge.setAttribute('title', '🎮 Anki remote / gamepad enabled (click to test and customize buttons)');
+				badge.textContent = '🎮 Remote';
+			}
+		});
+	}
+
+	private pollGamepadState(): void {
+		if (!this.isReviewBoxSelected()) return;
+		if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
+		const gamepads = navigator.getGamepads();
+		if (!gamepads) return;
+
+		let activeGamepad: Gamepad | null = null;
+		for (let i = 0; i < gamepads.length; i++) {
+			const gp = gamepads[i];
+			if (gp && gp.connected) {
+				activeGamepad = gp;
+				break;
+			}
+		}
+
+		if (!activeGamepad) {
+			if (this.connectedGamepadName !== null) {
+				this.connectedGamepadName = null;
+				this.updateGamepadBadge();
+			}
+			return;
+		}
+
+		if (this.connectedGamepadName !== activeGamepad.id) {
+			this.connectedGamepadName = activeGamepad.id;
+			this.updateGamepadBadge();
+		}
+
+		const buttons = activeGamepad.buttons;
+		for (let i = 0; i < buttons.length; i++) {
+			const btn = buttons[i];
+			if (!btn) continue;
+			const isPressed = btn.pressed || btn.value > 0.5;
+			const wasPressed = !!this.prevGamepadButtons[i];
+
+			if (isPressed && !wasPressed) {
+				this.handleGamepadButton(i);
+			}
+		}
+
+		this.prevGamepadButtons = buttons.map(b => (b ? (b.pressed || b.value > 0.5) : false));
+	}
+
+	private handleGamepadButton(btnIndex: number): void {
+		if (this.cards.length === 0) return;
+
+		const mapping = this.settings.gamepadMapping ?? DEFAULT_GAMEPAD_MAPPING;
+		const action = mapping[btnIndex] ?? 'none';
+		this.executeRemoteAction(action);
+	}
+
+	private executeRemoteAction(action: RemoteAction): void {
+		if (this.cards.length === 0) return;
+
+		if (!this.hasStarted) {
+			// On the "different deck" screen the user must pick an option explicitly.
+			const liveDeck = this.cards[0]?.deckName;
+			if (this.isLiveSync && this.config.deck && liveDeck && !isDeckOrSubdeck(liveDeck, this.config.deck)) return;
+			this.hasStarted = true;
+			void this.renderCurrentCard();
+			return;
+		}
+
+		switch (action) {
+			case 'flip_or_good':
+				if (!this.showingAnswer) {
+					void this.revealAnswer();
+				} else {
+					void this.rateCurrentCard(3);
+				}
+				break;
+			case 'flip_or_easy':
+				if (!this.showingAnswer) {
+					void this.revealAnswer();
+				} else {
+					void this.rateCurrentCard(4);
+				}
+				break;
+			case 'flip_or_hard':
+				if (!this.showingAnswer) {
+					void this.revealAnswer();
+				} else {
+					void this.rateCurrentCard(2);
+				}
+				break;
+			case 'flip_or_again':
+				if (!this.showingAnswer) {
+					void this.revealAnswer();
+				} else {
+					void this.rateCurrentCard(1);
+				}
+				break;
+			case 'again':
+				if (this.showingAnswer) void this.rateCurrentCard(1);
+				break;
+			case 'hard':
+				if (this.showingAnswer) void this.rateCurrentCard(2);
+				break;
+			case 'good':
+				if (this.showingAnswer) void this.rateCurrentCard(3);
+				break;
+			case 'easy':
+				if (this.showingAnswer) void this.rateCurrentCard(4);
+				break;
+			case 'flip':
+				if (!this.showingAnswer) void this.revealAnswer();
+				break;
+			case 'undo':
+				void this.undoLastCard();
+				break;
+			case 'suspend':
+				void this.suspendCurrentCard();
+				break;
+			case 'bury':
+				void this.buryCurrentCard();
+				break;
+			case 'flag':
+				void this.toggleFlagCurrentCard();
+				break;
+			case 'append_card_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.appendCardToNote(currentCard);
+				}
+				break;
+			}
+			case 'create_card_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.createNoteFromCard(currentCard);
+				}
+				break;
+			}
+			case 'toggle_timer': {
+				const pill = this.container.querySelector<HTMLElement>('.anki-embed-timer-pill');
+				if (pill) {
+					pill.click();
+				}
+				break;
+			}
+			case 'link_active_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.linkActiveNote(currentCard.cardId);
+				}
+				break;
+			}
+			case 'unlink_active_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.unlinkActiveNote(currentCard.cardId);
+				}
+				break;
+			}
+			case 'search_link_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard && this.app) {
+					new NoteSelectModal(this.app, (file) => {
+						void this.linkNoteToCard(file, currentCard.cardId);
+					}).open();
+				}
+				break;
+			}
+			case 'create_link_note': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.createNoteFromCard(currentCard);
+				}
+				break;
+			}
+			case 'open_links_menu': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					const btn = this.container.querySelector<HTMLElement>('.anki-embed-links-btn');
+					this.openCardLinksDropdown(btn ?? this.container, currentCard);
+				}
+				break;
+			}
+			case 'open_anki_browser': {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					void this.client.guiBrowse(`cid:${currentCard.cardId}`);
+				}
+				break;
+			}
+			case 'sync_anki': {
+				void (async () => {
+					try {
+						await this.client.sync();
+						new Notice('Anki sync complete');
+					} catch (err: unknown) {
+						const msg = err instanceof Error ? err.message : String(err);
+						new Notice(`Anki sync failed: ${msg}`);
+					}
+				})();
+				break;
+			}
+			case 'refresh_cards': {
+				void this.loadCards();
+				break;
+			}
+			case 'deck_picker': {
+				this.resetToDeckPicker();
+				break;
+			}
+			case 'none':
+			default:
+				break;
+		}
+	}
+
+	private async undoLastCard(): Promise<void> {
+		if (this.isLiveSync) {
+			this.isReviewingLiveCard = true;
+			this.lastUserActionTimestamp = Date.now();
+			try {
+				new Notice('Undid last review in Anki');
+				const nextCard = await this.client.guiUndoAndCurrentCard();
+				if (nextCard) {
+					this.cards = [nextCard];
+					this.currentIndex = 0;
+					this.showingAnswer = false;
+					await this.renderCurrentCard();
+					window.setTimeout(() => {
+						void this.updateCounts(nextCard.deckName || this.config.deck);
+					}, 20);
+				}
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`Failed to undo in Anki: ${msg}`);
+			} finally {
+				this.isReviewingLiveCard = false;
+			}
+			return;
+		}
+
+		if (this.reviewHistory.length === 0) {
+			new Notice('No previous reviews in this session to undo.');
+			return;
+		}
+
+		const lastReview = this.reviewHistory.pop();
+		if (!lastReview) return;
+
+		if (lastReview.statsDelta === 1) this.sessionStats.again = Math.max(0, this.sessionStats.again - 1);
+		else if (lastReview.statsDelta === 2) this.sessionStats.hard = Math.max(0, this.sessionStats.hard - 1);
+		else if (lastReview.statsDelta === 3) this.sessionStats.good = Math.max(0, this.sessionStats.good - 1);
+		else if (lastReview.statsDelta === 4) this.sessionStats.easy = Math.max(0, this.sessionStats.easy - 1);
+
+		this.timeStreak = lastReview.timeStreakBefore;
+		this.currentIndex = lastReview.index;
+		this.showingAnswer = false;
+		new Notice('Undid last card review');
+		const activeDeck = this.config.deck || lastReview.card.deckName;
+		await this.updateCounts(activeDeck);
+		await this.renderCurrentCard();
+	}
+
+	private async suspendCurrentCard(): Promise<void> {
+		const card = this.cards[this.currentIndex];
+		if (!card) return;
+
+		try {
+			await this.client.suspendCards([card.cardId]);
+			new Notice(`⏸️ Card ${card.cardId} suspended`);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to suspend card: ${msg}`);
+		}
+
+		if (this.isLiveSync) {
+			try {
+				const nextCard = await this.client.guiCurrentCard();
+				if (nextCard) {
+					this.cards = [nextCard];
+					this.currentIndex = 0;
+					this.showingAnswer = false;
+					await this.updateCounts(this.config.deck || nextCard.deckName);
+					await this.renderCurrentCard();
+				} else {
+					this.cards = [];
+					this.renderCompleted();
+				}
+			} catch {
+				// Fallback
+			}
+		} else {
+			this.cards.splice(this.currentIndex, 1);
+			this.showingAnswer = false;
+			if (this.currentIndex >= this.cards.length && this.cards.length > 0) {
+				this.currentIndex = 0;
+			}
+			const activeDeck = this.config.deck || card.deckName;
+			await this.updateCounts(activeDeck);
+			await this.renderCurrentCard();
+		}
+	}
+
+	private async buryCurrentCard(): Promise<void> {
+		const card = this.cards[this.currentIndex];
+		if (!card) return;
+
+		new Notice(`📦 Card ${card.cardId} buried for this session`);
+
+		if (this.isLiveSync) {
+			try {
+				const nextCard = await this.client.guiCurrentCard();
+				if (nextCard && nextCard.cardId !== card.cardId) {
+					this.cards = [nextCard];
+					this.currentIndex = 0;
+					this.showingAnswer = false;
+					await this.updateCounts(this.config.deck || nextCard.deckName);
+					await this.renderCurrentCard();
+					return;
+				}
+			} catch {
+				// Fallback
+			}
+		}
+
+		this.cards.splice(this.currentIndex, 1);
+		this.showingAnswer = false;
+		if (this.currentIndex >= this.cards.length && this.cards.length > 0) {
+			this.currentIndex = 0;
+		}
+		const activeDeck = this.config.deck || card.deckName;
+		await this.updateCounts(activeDeck);
+		await this.renderCurrentCard();
+	}
+
+	public async setFlagForCurrentCard(newFlag: number): Promise<void> {
+		const card = this.cards[this.currentIndex];
+		if (!card) return;
+
+		try {
+			await this.client.setSpecificValueOfCard(card.cardId, ['flags'], [newFlag], true);
+			card.flags = newFlag;
+
+			const flagConfig = ANKI_FLAG_CONFIGS[newFlag];
+			if (flagConfig) {
+				new Notice(`Card flagged (${flagConfig.name.toLowerCase()})`);
+			} else {
+				new Notice('Flag removed');
+			}
+
+			this.updateFlagButton(card);
+			this.updateCardFlagIndicator(card);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to update flag: ${msg}`);
+		}
+	}
+
+	private async toggleFlagCurrentCard(): Promise<void> {
+		const card = this.cards[this.currentIndex];
+		if (!card) return;
+
+		const currentFlag = card.flags ?? 0;
+		const newFlag = currentFlag > 0 ? 0 : 1;
+		await this.setFlagForCurrentCard(newFlag);
+	}
+
+	public showFlagColorMenu(evt: MouseEvent, card: AnkiCardInfo): void {
+		evt.preventDefault();
+		evt.stopPropagation();
+		const menu = new Menu();
+
+		const currentFlag = card.flags ?? 0;
+
+		for (let i = 1; i <= 7; i++) {
+			const flagConfig = ANKI_FLAG_CONFIGS[i];
+			if (!flagConfig) continue;
+
+			menu.addItem((item) => {
+				const titleFrag = createFragment();
+				titleFrag.createSpan({
+					cls: `anki-flag-dot anki-flag-${flagConfig.id}`,
+					text: '● ',
+				});
+				titleFrag.createSpan({
+					text: `${flagConfig.name} flag (${flagConfig.shortcut})`,
+				});
+
+				item.setTitle(titleFrag)
+					.setIcon('flag')
+					.setChecked(currentFlag === flagConfig.id)
+					.onClick(() => {
+						void this.setFlagForCurrentCard(currentFlag === flagConfig.id ? 0 : flagConfig.id);
+					});
+			});
+		}
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('Remove flag (ctrl+0)')
+				.setIcon('flag')
+				.setDisabled(currentFlag === 0)
+				.onClick(() => {
+					void this.setFlagForCurrentCard(0);
+				});
+		});
+
+		menu.showAtMouseEvent(evt);
+	}
+
 	private async renderDeckPicker(requestId: number = this.loadRequestId): Promise<void> {
 		this.container.empty();
 		this.renderHeader('Select deck', false, true);
 
 		const pickerDiv = this.container.createDiv({ cls: 'anki-embed-picker' });
-		pickerDiv.createDiv({ cls: 'anki-embed-picker-title', text: '📚 Choose an Anki deck to review' });
+		pickerDiv.createDiv({ cls: 'anki-embed-picker-title', text: 'Select deck to review' });
 
 		try {
 			const decks = await this.client.getDeckNames();
@@ -201,72 +2009,613 @@ export class DeckPlayer {
 				return;
 			}
 
+			const statsMap = new Map<string, { new: number; learn: number; review: number }>();
+			try {
+				const deckNamesAndIds = await this.client.getDeckNamesAndIds().catch(() => ({}));
+				const idToNameMap = new Map<number, string>();
+				if (deckNamesAndIds && typeof deckNamesAndIds === 'object') {
+					for (const [name, id] of Object.entries(deckNamesAndIds)) {
+						if (typeof id === 'number') {
+							idToNameMap.set(id, name);
+						}
+					}
+				}
+
+				const statsRecord = await this.client.getDeckStats(decks);
+				if (statsRecord && typeof statsRecord === 'object') {
+					for (const [key, stat] of Object.entries(statsRecord)) {
+						if (stat) {
+							const n = stat.new_count ?? (stat as unknown as { new?: number }).new ?? 0;
+							const l = stat.learn_count ?? (stat as unknown as { learn?: number }).learn ?? 0;
+							const r = stat.review_count ?? (stat as unknown as { due_count?: number; review?: number }).due_count ?? (stat as unknown as { review?: number }).review ?? 0;
+							const countsObj = { new: n, learn: l, review: r };
+
+							const numKey = Number(key);
+							if (!isNaN(numKey) && idToNameMap.has(numKey)) {
+								const fullName = idToNameMap.get(numKey)!;
+								statsMap.set(fullName, countsObj);
+								statsMap.set(fullName.toLowerCase().trim(), countsObj);
+							}
+							if (typeof stat.deck_id === 'number' && idToNameMap.has(stat.deck_id)) {
+								const fullName = idToNameMap.get(stat.deck_id)!;
+								statsMap.set(fullName, countsObj);
+								statsMap.set(fullName.toLowerCase().trim(), countsObj);
+							}
+							if (stat.name) {
+								statsMap.set(stat.name, countsObj);
+								statsMap.set(stat.name.toLowerCase().trim(), countsObj);
+							}
+						}
+					}
+				}
+			} catch {
+				// Fallback to empty counts if stats fail
+			}
+
+			const deckTree = buildDeckTree(decks);
+
+			const nodeCountsMap = new Map<string, { new: number; learn: number; review: number }>();
+			const rollupDeckNodeCounts = (node: DeckNode): { new: number; learn: number; review: number } => {
+				const direct = statsMap.get(node.fullPath) ??
+					statsMap.get(node.fullPath.toLowerCase().trim()) ??
+					statsMap.get(node.name) ??
+					statsMap.get(node.name.toLowerCase().trim()) ??
+					{ new: 0, learn: 0, review: 0 };
+
+				let childNew = 0;
+				let childLearn = 0;
+				let childReview = 0;
+
+				for (const child of node.children) {
+					const childCounts = rollupDeckNodeCounts(child);
+					childNew += childCounts.new;
+					childLearn += childCounts.learn;
+					childReview += childCounts.review;
+				}
+
+				let finalNew = direct.new;
+				let finalLearn = direct.learn;
+				let finalReview = direct.review;
+
+				if (node.children.length > 0) {
+					finalNew = direct.new >= childNew && childNew > 0 ? direct.new : direct.new + childNew;
+					finalLearn = direct.learn >= childLearn && childLearn > 0 ? direct.learn : direct.learn + childLearn;
+					finalReview = direct.review >= childReview && childReview > 0 ? direct.review : direct.review + childReview;
+				}
+
+				const finalCounts = { new: finalNew, learn: finalLearn, review: finalReview };
+				nodeCountsMap.set(node.fullPath, finalCounts);
+				return finalCounts;
+			};
+
+			for (const rootNode of deckTree) {
+				rollupDeckNodeCounts(rootNode);
+			}
+
 			const searchInput = pickerDiv.createEl('input', {
 				cls: 'anki-embed-search-input',
-				attr: { placeholder: '🔍 Search decks...' },
+				attr: { placeholder: 'Search decks...' },
 			});
 
-			const selectEl = pickerDiv.createEl('select', { cls: 'anki-embed-select' });
+			const treeContainer = pickerDiv.createDiv({ cls: 'anki-embed-deck-tree' });
 
 			const startBtn = pickerDiv.createEl('button', {
 				cls: 'anki-embed-flip-btn',
 				text: 'Start review',
 			});
 
-			const populateOptions = (filterText: string) => {
-				selectEl.empty();
-				const lower = filterText.trim().toLowerCase();
-				const filtered = decks.filter(d => d.toLowerCase().includes(lower));
+			const expandedDecks = new Set<string>();
+			if (this.config.deck) {
+				const parts = this.config.deck.split('::');
+				let path = '';
+				for (let i = 0; i < parts.length - 1; i++) {
+					path = path ? `${path}::${parts[i]}` : parts[i]!;
+					expandedDecks.add(path);
+				}
+			}
 
-				if (filtered.length === 0) {
-					const emptyOpt = selectEl.createEl('option', {
-						value: '',
-						text: 'No matching decks found',
-					});
-					emptyOpt.disabled = true;
-					selectEl.size = 2;
+			let selectedDeck = this.config.deck || '';
+
+			const updateStartButton = () => {
+				if (!selectedDeck) {
 					startBtn.disabled = true;
+					startBtn.setText('Select a deck to start');
+					startBtn.removeAttribute('title');
 				} else {
 					startBtn.disabled = false;
-					for (const deck of filtered) {
-						selectEl.createEl('option', { value: deck, text: deck });
+					const displayName = selectedDeck.split('::').pop() ?? selectedDeck;
+					startBtn.setText(`Start review: ${displayName}`);
+					startBtn.setAttribute('title', `Start review with ${selectedDeck}`);
+				}
+			};
+
+			const renderNode = (node: DeckNode) => {
+				const hasChildren = node.children.length > 0;
+				const isExpanded = expandedDecks.has(node.fullPath);
+				const isSelected = selectedDeck === node.fullPath;
+
+				const row = treeContainer.createDiv({
+					cls: `anki-embed-deck-row ${isSelected ? 'is-selected' : ''}`,
+					attr: {
+						'data-level': String(node.level),
+						title: node.fullPath,
+					},
+				});
+
+				const toggleEl = row.createSpan({
+					cls: `anki-embed-deck-toggle ${hasChildren ? '' : 'is-empty'}`,
+					text: hasChildren ? (isExpanded ? '▾' : '▸') : '',
+				});
+
+				if (hasChildren) {
+					toggleEl.onclick = (e) => {
+						e.stopPropagation();
+						if (expandedDecks.has(node.fullPath)) {
+							expandedDecks.delete(node.fullPath);
+						} else {
+							expandedDecks.add(node.fullPath);
+						}
+						renderTree(searchInput.value);
+					};
+				}
+
+				row.createSpan({
+					cls: 'anki-embed-deck-name',
+					text: node.name,
+				});
+
+				const counts = nodeCountsMap.get(node.fullPath) ?? statsMap.get(node.fullPath) ?? { new: 0, learn: 0, review: 0 };
+				const countsContainer = row.createDiv({ cls: 'anki-deck-counts' });
+
+				const newSpan = countsContainer.createSpan({
+					cls: `anki-deck-count is-new ${counts.new === 0 ? 'is-zero' : ''}`,
+					text: String(counts.new),
+				});
+				setTooltip(newSpan, `${counts.new} new`);
+
+				const learnSpan = countsContainer.createSpan({
+					cls: `anki-deck-count is-learn ${counts.learn === 0 ? 'is-zero' : ''}`,
+					text: String(counts.learn),
+				});
+				setTooltip(learnSpan, `${counts.learn} learn`);
+
+				const reviewSpan = countsContainer.createSpan({
+					cls: `anki-deck-count is-review ${counts.review === 0 ? 'is-zero' : ''}`,
+					text: String(counts.review),
+				});
+				setTooltip(reviewSpan, `${counts.review} due`);
+
+				row.onclick = () => {
+					selectedDeck = node.fullPath;
+					if (hasChildren) {
+						if (expandedDecks.has(node.fullPath)) {
+							expandedDecks.delete(node.fullPath);
+						} else {
+							expandedDecks.add(node.fullPath);
+						}
 					}
-					selectEl.size = Math.min(8, Math.max(4, filtered.length));
-					if (this.config.deck && filtered.includes(this.config.deck)) {
-						selectEl.value = this.config.deck;
-					} else if (filtered.length > 0) {
-						selectEl.selectedIndex = 0;
+					renderTree(searchInput.value);
+					updateStartButton();
+				};
+
+				row.ondblclick = () => {
+					selectedDeck = node.fullPath;
+					startBtn.click();
+				};
+
+				if (hasChildren && isExpanded) {
+					for (const child of node.children) {
+						renderNode(child);
 					}
 				}
 			};
 
-			populateOptions('');
+			const renderTree = (query: string = '') => {
+				treeContainer.empty();
+				const filteredTree = filterDeckTree(deckTree, query.trim(), expandedDecks);
+
+				if (filteredTree.length === 0) {
+					treeContainer.createDiv({
+						cls: 'anki-embed-empty',
+						text: 'No matching decks found',
+					});
+					selectedDeck = '';
+					updateStartButton();
+					return;
+				}
+
+				const isCurrentVisible = selectedDeck && decks.some(d => d === selectedDeck && (
+					!query.trim() || d.toLowerCase().includes(query.trim().toLowerCase())
+				));
+				if (query.trim() && (!selectedDeck || !isCurrentVisible)) {
+					selectedDeck = filteredTree[0]?.fullPath ?? '';
+				}
+
+				for (const rootNode of filteredTree) {
+					renderNode(rootNode);
+				}
+				updateStartButton();
+			};
+
+			renderTree('');
+			updateStartButton();
 
 			searchInput.oninput = () => {
-				populateOptions(searchInput.value);
+				renderTree(searchInput.value);
 			};
 
-			selectEl.ondblclick = () => {
-				if (selectEl.value) {
-					startBtn.click();
+			searchInput.addEventListener('keydown', (evt: KeyboardEvent) => {
+				if (evt.key === 'Escape') {
+					if (searchInput.value) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						searchInput.value = '';
+						renderTree('');
+					}
 				}
-			};
+			});
 
 			startBtn.onclick = () => {
-				const chosen = selectEl.value;
-				if (chosen) {
-					this.config.deck = chosen;
-					this.config.select = false;
-					this.hasStarted = true;
-					this.onDeckChange?.(chosen);
-					void this.loadCards();
+				if (selectedDeck) {
+					void this.startDeckFromPicker(selectedDeck);
 				}
 			};
+
+			const shouldShowHeatmap = this.config.heatmap ?? this.settings.showHeatmap;
+			if (shouldShowHeatmap) {
+				const heatmapContainer = pickerDiv.createDiv({ cls: 'anki-embed-heatmap-section' });
+				void this.renderReviewHeatmap(heatmapContainer);
+			}
 		} catch (err: unknown) {
 			if (requestId !== this.loadRequestId) return;
 			const msg = err instanceof Error ? err.message : String(err);
 			this.renderError(msg);
 		}
+	}
+
+	private async renderReviewHeatmap(container: HTMLElement): Promise<void> {
+		const card = container.createDiv({ cls: 'anki-embed-heatmap-card' });
+		const loader = card.createDiv({ cls: 'anki-embed-empty', text: '📅 Loading review heatmap...' });
+
+		try {
+			const dailyReviews = await this.client.getNumCardsReviewedByDay();
+			loader.remove();
+
+			if (!dailyReviews || dailyReviews.length === 0) {
+				card.createDiv({ cls: 'anki-embed-empty', text: 'No review history found in Anki.' });
+				return;
+			}
+
+			const reviewMap = new Map<string, number>();
+			let maxDaily = 0;
+			let totalReviews = 0;
+			for (const [dateStr, count] of dailyReviews) {
+				const num = Number(count) || 0;
+				reviewMap.set(dateStr, num);
+				totalReviews += num;
+				if (num > maxDaily) {
+					maxDaily = num;
+				}
+			}
+
+			const formatDateKey = (d: Date): string => {
+				const y = d.getFullYear();
+				const m = String(d.getMonth() + 1).padStart(2, '0');
+				const day = String(d.getDate()).padStart(2, '0');
+				return `${y}-${m}-${day}`;
+			};
+
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStr = formatDateKey(today);
+			const todayCount = reviewMap.get(todayStr) ?? 0;
+
+			// Current streak
+			let currentStreak = 0;
+			const checkDate = new Date(today);
+			if (todayCount === 0) {
+				checkDate.setDate(checkDate.getDate() - 1);
+			}
+			while (true) {
+				const key = formatDateKey(checkDate);
+				const c = reviewMap.get(key) ?? 0;
+				if (c > 0) {
+					currentStreak++;
+					checkDate.setDate(checkDate.getDate() - 1);
+				} else {
+					break;
+				}
+			}
+
+			// Longest streak
+			let longestStreak = 0;
+			let tempStreak = 0;
+			let prevDate: Date | null = null;
+			const sortedDates = Array.from(reviewMap.keys()).sort();
+			for (const dStr of sortedDates) {
+				const c = reviewMap.get(dStr) ?? 0;
+				if (c <= 0) continue;
+				const parts = dStr.split('-').map(Number);
+				if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) continue;
+				const curDate = new Date(parts[0], parts[1] - 1, parts[2]);
+
+				if (prevDate) {
+					const diffDays = Math.round((curDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24));
+					if (diffDays === 1) {
+						tempStreak++;
+					} else if (diffDays > 1) {
+						tempStreak = 1;
+					}
+				} else {
+					tempStreak = 1;
+				}
+				prevDate = curDate;
+				if (tempStreak > longestStreak) {
+					longestStreak = tempStreak;
+				}
+			}
+			if (currentStreak > longestStreak) {
+				longestStreak = currentStreak;
+			}
+
+			// Header with Title and Stats
+			const header = card.createDiv({ cls: 'anki-embed-heatmap-header' });
+			const titleDiv = header.createDiv({ cls: 'anki-embed-heatmap-title' });
+			titleDiv.setText('🔥 Review activity');
+
+			const statsDiv = header.createDiv({ cls: 'anki-embed-heatmap-stats' });
+
+			const addStat = (val: number | string, label: string) => {
+				const statBox = statsDiv.createDiv({ cls: 'anki-heatmap-stat' });
+				statBox.createSpan({ cls: 'stat-value', text: String(val) });
+				statBox.createSpan({ cls: 'stat-label', text: label });
+			};
+
+			addStat(currentStreak, 'Streak');
+			addStat(longestStreak, 'Longest');
+			addStat(todayCount, 'Today');
+			addStat(totalReviews, 'Total');
+
+			// Heatmap Grid: 40 weeks back (~9 months)
+			const totalWeeks = 40;
+			const dayOfWeek = today.getDay(); // 0 is Sunday
+			const endSaturday = new Date(today);
+			endSaturday.setDate(today.getDate() + (6 - dayOfWeek));
+
+			const startSunday = new Date(endSaturday);
+			startSunday.setDate(endSaturday.getDate() - (totalWeeks * 7 - 1));
+
+			const scrollWrapper = card.createDiv({ cls: 'anki-embed-heatmap-scroll' });
+			const monthsRow = scrollWrapper.createDiv({ cls: 'anki-heatmap-months' });
+
+			const gridContainer = scrollWrapper.createDiv({ cls: 'anki-heatmap-grid-container' });
+
+			// Footer with legend and live hover info
+			const footer = card.createDiv({ cls: 'anki-embed-heatmap-footer' });
+			const hoverInfo = footer.createSpan({
+				cls: 'anki-heatmap-hover-info',
+				text: 'Hover on a day to see cards reviewed',
+			});
+			const legend = footer.createDiv({ cls: 'anki-heatmap-legend' });
+			legend.createSpan({ cls: 'anki-heatmap-legend-label', text: 'Less' });
+			for (let lvl = 0; lvl <= 4; lvl++) {
+				legend.createSpan({ cls: 'anki-heatmap-cell', attr: { 'data-level': String(lvl) } });
+			}
+			legend.createSpan({ cls: 'anki-heatmap-legend-label', text: 'More' });
+
+			// Day labels
+			const dayLabels = gridContainer.createDiv({ cls: 'anki-heatmap-day-labels' });
+			const dayNames = ['', 'M', '', 'W', '', 'F', ''];
+			for (const dn of dayNames) {
+				dayLabels.createDiv({ text: dn });
+			}
+
+			const grid = gridContainer.createDiv({ cls: 'anki-heatmap-grid' });
+
+			let lastMonth = -1;
+			const iterDate = new Date(startSunday);
+			for (let w = 0; w < totalWeeks; w++) {
+				const weekDiv = grid.createDiv({ cls: 'anki-heatmap-week' });
+
+				const curMonth = iterDate.getMonth();
+				if (curMonth !== lastMonth) {
+					lastMonth = curMonth;
+					const monthName = iterDate.toLocaleDateString(undefined, { month: 'short' });
+					monthsRow.createSpan({
+						cls: 'anki-heatmap-month-label',
+						text: monthName,
+						attr: { style: 'width: calc(14px * 4);' },
+					});
+				}
+
+				for (let d = 0; d < 7; d++) {
+					const cellDate = new Date(iterDate);
+					const dateKey = formatDateKey(cellDate);
+					const isFuture = cellDate.getTime() > today.getTime();
+					const count = reviewMap.get(dateKey) ?? 0;
+
+					let level = 0;
+					if (count > 0) {
+						if (maxDaily <= 10) {
+							level = count >= 6 ? 4 : count >= 4 ? 3 : count >= 2 ? 2 : 1;
+						} else {
+							const ratio = count / maxDaily;
+							level = ratio > 0.6 ? 4 : ratio > 0.3 ? 3 : ratio > 0.1 ? 2 : 1;
+						}
+					}
+
+					const formattedDate = cellDate.toLocaleDateString(undefined, {
+						month: 'short',
+						day: 'numeric',
+						year: 'numeric',
+					});
+					const title = count > 0
+						? `${count} cards reviewed on ${formattedDate}`
+						: `No reviews on ${formattedDate}`;
+
+					const cell = weekDiv.createDiv({
+						cls: `anki-heatmap-cell ${isFuture ? 'is-future' : ''}`,
+						attr: {
+							'data-level': String(level),
+						},
+					});
+
+					setTooltip(cell, title);
+
+					cell.addEventListener('mouseenter', () => {
+						hoverInfo.setText(`📅 ${title}`);
+					});
+					cell.addEventListener('mouseleave', () => {
+						hoverInfo.setText('Hover on a day to see cards reviewed');
+					});
+
+					if (dateKey === todayStr) {
+						cell.addClass('is-today');
+					}
+
+					iterDate.setDate(iterDate.getDate() + 1);
+				}
+			}
+
+			window.setTimeout(() => {
+				scrollWrapper.scrollLeft = scrollWrapper.scrollWidth;
+			}, 50);
+		} catch {
+			loader.setText('Could not connect to Anki to load review history.');
+		}
+	}
+
+	private promptDeckReviewMode(selectedDeck: string): void {
+		const existingOverlay = this.container.querySelector('.anki-mode-select-overlay');
+		if (existingOverlay) {
+			existingOverlay.remove();
+		}
+
+		const overlay = this.container.createDiv({ cls: 'anki-mode-select-overlay' });
+		const modal = overlay.createDiv({ cls: 'anki-mode-select-modal' });
+
+		const closeOverlay = () => {
+			document.removeEventListener('keydown', onEscKey);
+			overlay.remove();
+		};
+
+		const onEscKey = (evt: KeyboardEvent) => {
+			if (evt.key === 'Escape') {
+				evt.preventDefault();
+				evt.stopPropagation();
+				closeOverlay();
+			}
+		};
+		document.addEventListener('keydown', onEscKey);
+
+		overlay.onclick = (e) => {
+			if (e.target === overlay) {
+				closeOverlay();
+			}
+		};
+
+		const renderInitialScreen = () => {
+			modal.empty();
+
+			modal.createEl('h3', { cls: 'anki-mode-select-title', text: 'Choose review mode' });
+
+			const deckBadge = modal.createDiv({ cls: 'anki-mode-select-deck-badge' });
+			deckBadge.setText(selectedDeck);
+
+			modal.createEl('p', {
+				cls: 'anki-mode-select-desc',
+				text: 'Select how you want to review this deck:',
+			});
+
+			const options = modal.createDiv({ cls: 'anki-mode-select-options' });
+
+			// Option 1: Live sync
+			const liveCard = options.createDiv({ cls: 'anki-mode-select-card' });
+			liveCard.createSpan({ cls: 'anki-mode-select-card-icon', text: '⚡' });
+			const liveContent = liveCard.createDiv({ cls: 'anki-mode-select-card-content' });
+			liveContent.createSpan({ cls: 'anki-mode-select-card-title', text: 'Live sync' });
+			const liveDesc = liveContent.createSpan({
+				cls: 'anki-mode-select-card-desc',
+				text: 'Mirror and control the Anki desktop app in real time',
+			});
+
+			// Option 2: Remote mode
+			const remoteCard = options.createDiv({ cls: 'anki-mode-select-card' });
+			remoteCard.createSpan({ cls: 'anki-mode-select-card-icon', text: '🌐' });
+			const remoteContent = remoteCard.createDiv({ cls: 'anki-mode-select-card-content' });
+			remoteContent.createSpan({ cls: 'anki-mode-select-card-title', text: 'Remote mode' });
+			remoteContent.createSpan({
+				cls: 'anki-mode-select-card-desc',
+				text: 'Review cards independently in Obsidian via AnkiConnect',
+			});
+
+			const actions = modal.createDiv({ cls: 'anki-mode-select-actions' });
+			const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+			cancelBtn.onclick = () => {
+				closeOverlay();
+			};
+
+			remoteCard.onclick = () => {
+				closeOverlay();
+				this.config.live = false;
+				this.config.deck = selectedDeck;
+				this.config.select = false;
+				this.hasStarted = true;
+				this.onDeckChange?.(selectedDeck);
+				void this.loadCards();
+			};
+
+			liveCard.onclick = async () => {
+				liveCard.addClass('is-loading');
+				liveDesc.setText('Checking Anki desktop...');
+
+				try {
+					await this.client.guiCurrentCard();
+				} catch (err: unknown) {
+					liveCard.removeClass('is-loading');
+					const msg = err instanceof Error ? err.message : String(err);
+					renderErrorScreen(msg);
+					return;
+				}
+				closeOverlay();
+				await this.switchToLiveMode(selectedDeck);
+			};
+		};
+
+		const renderErrorScreen = (errorMsg: string) => {
+			modal.empty();
+
+			const header = modal.createDiv({ cls: 'anki-mode-warning-header' });
+			header.createSpan({ text: '⚠️' });
+			header.createSpan({ text: 'Cannot connect to Anki' });
+
+			modal.createEl('p', {
+				cls: 'anki-mode-select-desc',
+				text: `Could not connect to Anki desktop: ${errorMsg}. Please ensure Anki is open and AnkiConnect is running.`,
+			});
+
+			const actions = modal.createDiv({ cls: 'anki-mode-select-actions' });
+			const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+			cancelBtn.onclick = () => {
+				closeOverlay();
+			};
+
+			const remoteFallbackBtn = actions.createEl('button', {
+				cls: 'mod-cta',
+				text: 'Review in remote mode instead',
+			});
+			remoteFallbackBtn.onclick = () => {
+				closeOverlay();
+				this.config.live = false;
+				this.config.deck = selectedDeck;
+				this.config.select = false;
+				this.hasStarted = true;
+				this.onDeckChange?.(selectedDeck);
+				void this.loadCards();
+			};
+		};
+
+		renderInitialScreen();
 	}
 
 	private renderStartScreen() {
@@ -281,8 +2630,10 @@ export class DeckPlayer {
 		startDiv.createEl('h3', { text: 'Ready to review' });
 		startDiv.createEl('p', { text: `Found ${this.cards.length} cards matching your criteria.` });
 
-		const startBtn = startDiv.createEl('button', {
-			cls: 'anki-embed-flip-btn',
+		const actions = startDiv.createDiv({ cls: 'anki-start-actions' });
+
+		const startBtn = actions.createEl('button', {
+			cls: 'anki-embed-flip-btn anki-start-btn',
 			text: 'Start session',
 		});
 		startBtn.onclick = () => {
@@ -290,8 +2641,8 @@ export class DeckPlayer {
 			void this.renderCurrentCard();
 		};
 
-		const changeBtn = startDiv.createEl('button', {
-			cls: 'anki-embed-btn-secondary',
+		const changeBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary anki-start-btn anki-start-back-btn',
 			text: '↩ Back to deck selection',
 		});
 		changeBtn.onclick = () => {
@@ -316,6 +2667,15 @@ export class DeckPlayer {
 		const body = this.container.createDiv({ cls: 'anki-embed-empty' });
 		body.createDiv({ text: '🎉 No cards found matching this query or deck.' });
 
+		if (this.config.query) {
+			const queryHint = body.createDiv({
+				cls: 'anki-embed-empty-query',
+				attr: { style: 'margin-top: 8px; font-size: 0.88em; opacity: 0.85;' },
+			});
+			queryHint.createSpan({ text: 'Searched query: ' });
+			queryHint.createEl('code', { text: this.config.query });
+		}
+
 		const actions = body.createDiv({ cls: 'anki-embed-actions' });
 		const refreshBtn = actions.createEl('button', {
 			cls: 'anki-embed-flip-btn',
@@ -335,6 +2695,16 @@ export class DeckPlayer {
 	}
 
 	private renderError(message: string) {
+		if (message.toLowerCase().includes('not currently active')) {
+			if (this.isLiveSync) {
+				this.cards = [];
+				this.renderEmptyLive();
+				return;
+			}
+			this.cards = [];
+			this.renderEmpty();
+			return;
+		}
 		this.container.empty();
 		const errDiv = this.container.createDiv({ cls: 'anki-embed-error' });
 		errDiv.createEl('strong', { text: '⚠️ AnkiConnect error' });
@@ -345,70 +2715,341 @@ export class DeckPlayer {
 		steps.createEl('li', { text: '2. Ensure the AnkiConnect add-on (code 2055492159) is installed in Anki.' });
 		steps.createEl('li', { text: '3. Verify the AnkiConnect URL in plugin settings.' });
 
-		const retryBtn = errDiv.createEl('button', {
+		const actions = errDiv.createDiv({ cls: 'anki-embed-actions', attr: { style: 'margin-top: 14px; justify-content: center; gap: 8px; flex-wrap: wrap;' } });
+
+		const retryBtn = actions.createEl('button', {
 			cls: 'anki-embed-flip-btn',
 			text: '🔄 Retry connection',
 		});
 		retryBtn.onclick = () => {
 			void this.loadCards();
 		};
+
+		if (this.isLiveSync) {
+			const offlineBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-secondary',
+				text: 'Switch to offline mode',
+			});
+			offlineBtn.onclick = () => {
+				this.config.live = false;
+				this.hasStarted = true;
+				void this.loadCards();
+			};
+		}
+
+		const pickerBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: '↩ Back to deck selection',
+		});
+		pickerBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
+	}
+
+	private renderViewModeButton(container: HTMLElement): void {
+		if (this.isAnkiFullscreen) {
+			const exitBtn = container.createEl('button', {
+				cls: 'anki-embed-btn-icon anki-embed-fs-btn is-active',
+				text: 'Exit ⛶',
+				attr: { title: 'Exit Anki fullscreen mode (esc)' },
+			});
+			exitBtn.onclick = () => {
+				this.toggleAnkiFullscreen(false);
+			};
+		} else if (this.onOpenFullView && !this.isFullView) {
+			const fullViewBtn = container.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: '⛶',
+				attr: { title: 'Open in full editor view' },
+			});
+			fullViewBtn.onclick = () => {
+				this.onOpenFullView?.(this.config);
+			};
+		} else if (this.isFullView) {
+			const fsBtn = container.createEl('button', {
+				cls: 'anki-embed-btn-icon anki-embed-fs-btn',
+				text: '⛶',
+				attr: { title: 'Enter Anki fullscreen mode (f11)' },
+			});
+			fsBtn.onclick = () => {
+				this.toggleAnkiFullscreen(true);
+			};
+		}
 	}
 
 	private renderHeader(titleText?: string, showOpenAnki: boolean = false, isPicker: boolean = false) {
 		const header = this.container.createDiv({ cls: 'anki-embed-header' });
 
 		const titleContainer = header.createDiv({ cls: 'anki-embed-title' });
-		const title = titleText || this.config.deck || this.config.query || 'Anki Deck';
+		let title = titleText || this.config.deck;
+		if (!title && this.config.query) {
+			const tagMatch = this.config.query.match(/tag:(?:"\*?|\*?)(.*?)\*?"?$/);
+			if (tagMatch?.[1]) {
+				const parts = tagMatch[1].split('*').filter(Boolean);
+				const leaf = parts[parts.length - 1] ?? tagMatch[1];
+				title = `#${leaf.replace(/_/g, ' ')}`;
+			} else {
+				title = this.config.query;
+			}
+		}
+		if (!title) {
+			title = 'Anki Deck';
+		}
 		titleContainer.createSpan({ text: title });
 
-		if (this.cards.length > 0) {
-			titleContainer.createSpan({
-				cls: 'anki-embed-badge',
-				text: `${this.currentIndex + 1} / ${this.cards.length}`,
+		const isGamepadConfigured = this.config.remote ?? this.settings.enableGamepad;
+		if (isGamepadConfigured && !isPicker) {
+			const badge = titleContainer.createSpan({
+				cls: `anki-embed-gamepad-badge ${this.connectedGamepadName ? 'is-connected' : ''}`,
+				text: this.connectedGamepadName ? '🎮 Remote connected' : '🎮 Remote',
+				attr: {
+					title: this.connectedGamepadName
+						? `🎮 Controller: ${this.connectedGamepadName} (click to customize buttons)`
+						: '🎮 Anki remote / gamepad enabled (click to test and customize buttons)',
+				},
 			});
+			if (this.app) {
+				badge.onclick = () => {
+					new AnkiRemoteConfigModal(this.app!, {
+						settings: this.settings,
+						saveData: async (updated) => {
+							this.settings = updated;
+							if (this.saveSettings) {
+								await this.saveSettings(updated);
+							}
+						},
+					}).open();
+				};
+			}
+		}
+
+		if (this.cards.length > 0) {
+			if (this.isLiveSync) {
+				const liveBadge = titleContainer.createSpan({
+					cls: 'anki-embed-badge anki-embed-badge-live is-clickable',
+					text: '⚡ Live sync',
+					attr: { title: 'Live sync with Anki desktop is on (click to switch to offline deck mode)' },
+				});
+				liveBadge.onclick = () => {
+					this.config.live = false;
+					this.hasStarted = true;
+					void this.loadCards();
+				};
+			} else {
+				const counterBadge = titleContainer.createSpan({
+					cls: 'anki-embed-badge is-clickable',
+					text: `${this.currentIndex + 1} / ${this.cards.length}`,
+					attr: { title: 'Offline mode (click to switch to live sync with Anki desktop)' },
+				});
+				counterBadge.onclick = () => {
+					void this.switchToLiveMode();
+				};
+
+				const modePill = titleContainer.createSpan({
+					cls: `anki-embed-badge anki-embed-mode-pill is-clickable ${this.isLearningMode ? 'is-learning' : 'is-browse'}`,
+					text: this.isLearningMode ? '🎯 Learn' : '📋 Browse',
+					attr: {
+						title: this.isLearningMode
+							? 'Mode: Learning (Anki steps & due priority). Click to switch to browse mode, right-click to change order'
+							: 'Mode: Browse (linear preview). Click to switch to learning mode',
+					},
+				});
+				modePill.onclick = (e) => {
+					e.stopPropagation();
+					this.isLearningMode = !this.isLearningMode;
+					new Notice(this.isLearningMode ? 'Switched to learning mode (Anki steps & due priority)' : 'Switched to browse mode (linear review)');
+					void this.loadCards();
+				};
+				modePill.addEventListener('contextmenu', (e: MouseEvent) => {
+					e.preventDefault();
+					e.stopPropagation();
+					const menu = new Menu();
+					const currentOrder = this.config.learningOrder ?? this.settings.learningOrder ?? 'due-new-future';
+					menu.addItem((item) => {
+						item.setTitle('Due > new > future reviews')
+							.setChecked(currentOrder === 'due-new-future')
+							.onClick(() => {
+								this.config.learningOrder = 'due-new-future';
+								new Notice('Learning order: Due > new > future reviews');
+								void this.loadCards();
+							});
+					});
+					menu.addItem((item) => {
+						item.setTitle('Due > future reviews > new')
+							.setChecked(currentOrder === 'due-future-new')
+							.onClick(() => {
+								this.config.learningOrder = 'due-future-new';
+								new Notice('Learning order: Due > future reviews > new');
+								void this.loadCards();
+							});
+					});
+					menu.showAtMouseEvent(e);
+				});
+			}
+
+			const shouldShowTimer = this.config.timer ?? this.settings.enableCardTimer;
+			if (shouldShowTimer && !isPicker) {
+				const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+				const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+				const timerPill = titleContainer.createDiv({
+					cls: `anki-embed-timer-pill ${this.isTimerPaused ? 'is-paused' : 'is-normal'}`,
+					attr: {
+						title: this.isTimerPaused
+							? 'Timer paused (click to resume)'
+							: `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s (click to pause)`,
+					},
+				});
+				const clockEl = timerPill.createSpan({ cls: 'anki-timer-clock', text: this.isTimerPaused ? '⏸️' : '⏱️' });
+				const elapsedSoFar = this.getCardElapsedSec();
+				const timerTextEl = timerPill.createSpan({
+					cls: 'anki-timer-seconds',
+					text: `${elapsedSoFar.toFixed(1)}s`,
+				});
+				const streakEl = timerPill.createSpan({
+					cls: 'anki-timer-streak',
+					text: `⚡ ${this.timeStreak}`,
+					attr: { title: `Time limit streak: ${this.timeStreak} cards in a row under limit` },
+				});
+
+				timerPill.onclick = () => {
+					this.toggleTimerPause(timerPill, clockEl, timerTextEl, streakEl);
+				};
+
+				this.startCardTimer(timerPill, clockEl, timerTextEl, streakEl);
+			}
+
+			const shouldShowLinks = this.config.links ?? this.settings.enableCardLinks;
+			if (!isPicker && this.cards.length > 0 && shouldShowLinks) {
+				const currentCard = this.cards[this.currentIndex];
+				if (currentCard) {
+					this.renderLinksButton(titleContainer, currentCard);
+				}
+			}
 		}
 
 		const actions = header.createDiv({ cls: 'anki-embed-actions' });
 
-		if (this.onOpenFullView && !this.isFullView) {
-			const fullViewBtn = actions.createEl('button', {
+		if (isPicker) {
+			const refreshBtn = actions.createEl('button', {
 				cls: 'anki-embed-btn-icon',
-				text: 'Full view',
-				attr: { title: 'Open in full editor view' },
+				text: '🔄 Refresh',
+				attr: { title: 'Refresh decks from Anki' },
 			});
-			fullViewBtn.onclick = () => {
-				this.onOpenFullView?.(this.config);
+			refreshBtn.onclick = () => {
+				void this.renderDeckPicker();
 			};
+
+			const syncBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: '☁️ sync',
+				attr: { title: 'Sync with ankiweb' },
+			});
+			syncBtn.onclick = async () => {
+				const originalText = syncBtn.textContent;
+				syncBtn.textContent = '⏳';
+				syncBtn.disabled = true;
+				try {
+					await this.client.sync();
+					new Notice('Anki sync complete');
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					new Notice(`Anki sync failed: ${msg}`);
+				} finally {
+					syncBtn.textContent = originalText;
+					syncBtn.disabled = false;
+				}
+			};
+
+			this.renderViewModeButton(actions);
+			return;
 		}
 
-		if (!isPicker) {
-			const pickerBtn = actions.createEl('button', {
+		if (!this.hasStarted) {
+			const refreshBtn = actions.createEl('button', {
 				cls: 'anki-embed-btn-icon',
-				text: '↩ Deck selection',
-				attr: { title: 'Reset view and back to deck selection' },
+				text: '🔄',
+				attr: { title: 'Refresh cards from Anki' },
+			});
+			refreshBtn.onclick = () => {
+				void this.loadCards();
+			};
+
+			const syncBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon',
+				text: '☁️',
+				attr: { title: 'Sync with ankiweb' },
+			});
+			syncBtn.onclick = async () => {
+				const originalText = syncBtn.textContent;
+				syncBtn.textContent = '⏳';
+				syncBtn.disabled = true;
+				try {
+					await this.client.sync();
+					new Notice('Anki sync complete');
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					new Notice(`Anki sync failed: ${msg}`);
+				} finally {
+					syncBtn.textContent = originalText;
+					syncBtn.disabled = false;
+				}
+			};
+
+			const pickerBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon anki-embed-btn-decks',
+				text: '📚',
+				attr: { title: 'Back to deck selection' },
 			});
 			pickerBtn.onclick = () => {
 				this.resetToDeckPicker();
 			};
+
+			this.renderViewModeButton(actions);
+			return;
 		}
 
-		const refreshBtn = actions.createEl('button', {
-			cls: 'anki-embed-btn-icon',
-			text: '🔄 Refresh',
-			attr: { title: isPicker ? 'Refresh decks from Anki' : 'Refresh cards from Anki (r)' },
-		});
-		refreshBtn.onclick = () => {
-			if (isPicker) {
-				void this.renderDeckPicker();
-			} else {
-				void this.loadCards();
+		// When actively reviewing: keep only high-frequency compact icon buttons
+		if (this.cards.length > 0 || this.reviewHistory.length > 0) {
+			const undoBtn = actions.createEl('button', {
+				cls: 'anki-embed-btn-icon anki-embed-undo-btn',
+				text: '↩️',
+				attr: { title: 'Undo last review (z)' },
+			});
+			undoBtn.onclick = () => {
+				void this.undoLastCard();
+			};
+		}
+
+		if (this.cards.length > 0) {
+			const currentCard = this.cards[this.currentIndex];
+			if (currentCard) {
+				const flagNum = currentCard.flags ?? 0;
+				const isFlagged = flagNum > 0 && flagNum <= 7;
+				const flagConfig = isFlagged ? ANKI_FLAG_CONFIGS[flagNum] : null;
+				const flagBtn = actions.createEl('button', {
+					cls: `anki-embed-btn-icon anki-embed-btn-flag ${isFlagged ? `is-flagged anki-flag-${flagNum}` : ''}`,
+					attr: {
+						title: isFlagged
+							? `${flagConfig?.name ?? 'Card'} flag (f). Right-click to change color`
+							: 'Flag card (f). Right-click to choose color',
+					},
+				});
+				setIcon(flagBtn, 'flag');
+				flagBtn.onclick = () => {
+					void this.toggleFlagCurrentCard();
+				};
+				flagBtn.oncontextmenu = (evt: MouseEvent) => {
+					evt.preventDefault();
+					evt.stopPropagation();
+					this.showFlagColorMenu(evt, currentCard);
+				};
 			}
-		};
+		}
 
 		const syncBtn = actions.createEl('button', {
-			cls: 'anki-embed-btn-icon',
-			text: '☁️ sync',
-			attr: { title: 'Sync with ankiweb' },
+			cls: 'anki-embed-btn-icon anki-embed-btn-sync',
+			text: '☁️',
+			attr: { title: 'Sync with Anki' },
 		});
 		syncBtn.onclick = async () => {
 			const originalText = syncBtn.textContent;
@@ -417,6 +3058,10 @@ export class DeckPlayer {
 			try {
 				await this.client.sync();
 				new Notice('Anki sync complete');
+				const activeDeck = this.config.deck || this.cards[0]?.deckName;
+				if (activeDeck) {
+					void this.updateCounts(activeDeck);
+				}
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				new Notice(`Anki sync failed: ${msg}`);
@@ -426,14 +3071,28 @@ export class DeckPlayer {
 			}
 		};
 
-		if (showOpenAnki) {
-			const openBtn = actions.createEl('button', {
+		const decksBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-icon anki-embed-btn-decks',
+			text: '📚',
+			attr: { title: 'Back to deck selection' },
+		});
+		decksBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
+
+		this.renderViewModeButton(actions);
+
+		if (this.cards.length > 0 && this.cards[this.currentIndex]) {
+			const currentCard = this.cards[this.currentIndex];
+			const moreBtn = actions.createEl('button', {
 				cls: 'anki-embed-btn-icon',
-				text: '↗️ Open Anki',
-				attr: { title: 'Open this deck in Anki desktop app' },
+				text: '⋯',
+				attr: { title: 'More options and actions' },
 			});
-			openBtn.onclick = () => {
-				void this.openDeckInAnki();
+			moreBtn.onclick = (evt: MouseEvent) => {
+				if (currentCard) {
+					this.showCardContextMenu(evt, currentCard);
+				}
 			};
 		}
 	}
@@ -445,7 +3104,7 @@ export class DeckPlayer {
 				await this.client.guiDeckReview(deckToOpen);
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				this.renderError(msg);
+				new Notice(`Could not open deck in Anki: ${msg}`);
 			}
 		}
 	}
@@ -547,53 +3206,282 @@ export class DeckPlayer {
 		return mimeTypes[extension ?? ''] ?? 'application/octet-stream';
 	}
 
-	private async renderCurrentCard() {
-		this.container.empty();
+	private async getCardCss(card: AnkiCardInfo): Promise<string> {
+		if (card.css && card.css.trim().length > 0) {
+			return card.css;
+		}
+		if (!card.modelName) {
+			return '';
+		}
+		if (this.modelStyleCache.has(card.modelName)) {
+			return this.modelStyleCache.get(card.modelName) ?? '';
+		}
+		try {
+			const styling = await this.client.getModelStyling(card.modelName);
+			const css = styling?.css ?? '';
+			this.modelStyleCache.set(card.modelName, css);
+			return css;
+		} catch {
+			this.modelStyleCache.set(card.modelName, '');
+			return '';
+		}
+	}
 
+	private async getNormalizedCardCss(card: AnkiCardInfo): Promise<string> {
+		const key = card.modelName || (card.css ? `custom-${card.cardId}` : '');
+		if (key && this.normalizedStyleCache.has(key)) {
+			return this.normalizedStyleCache.get(key) ?? '';
+		}
+		const rawCss = await this.getCardCss(card);
+		const normalizedCss = normalizeAnkiCss(rawCss);
+		if (key) {
+			this.normalizedStyleCache.set(key, normalizedCss);
+		}
+		return normalizedCss;
+	}
+
+	private async getQuestionFragment(card: AnkiCardInfo): Promise<DocumentFragment> {
+		const cached = this.preparedQuestionCache.get(card.cardId);
+		if (cached) {
+			this.preparedQuestionCache.delete(card.cardId);
+			return cached.cloneNode(true) as DocumentFragment;
+		}
+		return await this.getResolvedMediaFragment(formatCardHtml(card.question));
+	}
+
+	private async getAnswerFragment(card: AnkiCardInfo): Promise<DocumentFragment> {
+		const cached = this.preparedAnswerCache.get(card.cardId);
+		if (cached) {
+			this.preparedAnswerCache.delete(card.cardId);
+			return cached.cloneNode(true) as DocumentFragment;
+		}
+		const isCloze = isClozeCard(card);
+		const answerHtml = isCloze
+			? formatCardHtml(card.answer, card.question)
+			: extractAnswerHtml(formatCardHtml(card.answer, card.question));
+		return await this.getResolvedMediaFragment(answerHtml);
+	}
+
+	private prepareAnswerFragment(card: AnkiCardInfo): void {
+		if (this.preparedAnswerCache.has(card.cardId)) return;
+		window.setTimeout(() => {
+			void (async () => {
+				try {
+					const isCloze = isClozeCard(card);
+					const answerHtml = isCloze
+						? formatCardHtml(card.answer, card.question)
+						: extractAnswerHtml(formatCardHtml(card.answer, card.question));
+					const frag = await this.getResolvedMediaFragment(answerHtml);
+					this.preparedAnswerCache.set(card.cardId, frag);
+				} catch {
+					// Background pre-resolve is non-fatal
+				}
+			})();
+		}, 0);
+	}
+
+	private preparseNextCard(): void {
+		if (this.isLiveSync || this.currentIndex + 1 >= this.cards.length) return;
+		const nextCard = this.cards[this.currentIndex + 1];
+		if (!nextCard || this.preparedQuestionCache.has(nextCard.cardId)) return;
+		window.setTimeout(() => {
+			void (async () => {
+				try {
+					void this.getNormalizedCardCss(nextCard);
+					const frag = await this.getResolvedMediaFragment(formatCardHtml(nextCard.question));
+					this.preparedQuestionCache.set(nextCard.cardId, frag);
+				} catch {
+					// Background pre-parse failure is non-fatal
+				}
+			})();
+		}, 30);
+	}
+
+	private updateFlagButton(card?: AnkiCardInfo): void {
+		const targetCard = card ?? this.cards[this.currentIndex];
+		if (!targetCard) return;
+		const flagNum = targetCard.flags ?? 0;
+		const isFlagged = flagNum > 0 && flagNum <= 7;
+		const flagConfig = isFlagged ? ANKI_FLAG_CONFIGS[flagNum] : null;
+		const flagBtn = this.container.querySelector<HTMLElement>('.anki-embed-btn-flag');
+		if (flagBtn) {
+			flagBtn.empty();
+			setIcon(flagBtn, 'flag');
+
+			for (let i = 1; i <= 7; i++) {
+				flagBtn.removeClass(`anki-flag-${i}`);
+			}
+
+			if (isFlagged) {
+				flagBtn.addClass('is-flagged');
+				flagBtn.addClass(`anki-flag-${flagNum}`);
+				flagBtn.setAttribute(
+					'title',
+					`${flagConfig?.name ?? 'Card'} flag (f). Right-click to change color`
+				);
+			} else {
+				flagBtn.removeClass('is-flagged');
+				flagBtn.setAttribute('title', 'Flag card (f). Right-click to choose color');
+			}
+		}
+	}
+
+	public updateCardFlagIndicator(card?: AnkiCardInfo): void {
+		const targetCard = card ?? this.cards[this.currentIndex];
+		if (!targetCard || !this.currentCardContainer) return;
+
+		const existing = this.currentCardContainer.querySelector('.anki-card-flag-badge');
+		if (existing) {
+			existing.remove();
+		}
+
+		const flagNum = targetCard.flags ?? 0;
+		const isFlagged = flagNum > 0 && flagNum <= 7;
+		const flagConfig = isFlagged ? ANKI_FLAG_CONFIGS[flagNum] : null;
+
+		const flagEl = this.currentCardContainer.createDiv({
+			cls: `anki-card-flag-badge ${isFlagged ? `anki-flag-${flagNum}` : 'is-empty'}`,
+			attr: {
+				title: isFlagged
+					? `${flagConfig?.name ?? 'Card'} flag (click to change)`
+					: 'Flag card (click to choose color)',
+			},
+		});
+
+		setIcon(flagEl, 'flag');
+
+		flagEl.onclick = (evt: MouseEvent) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			this.showFlagColorMenu(evt, targetCard);
+		};
+
+		flagEl.oncontextmenu = (evt: MouseEvent) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			this.showFlagColorMenu(evt, targetCard);
+		};
+	}
+
+	private updateCountsDisplay(card?: AnkiCardInfo): void {
+		if (!this.footerEl) return;
+		const currentCard = card ?? this.cards[this.currentIndex];
+		const statusPill = this.footerEl.querySelector<HTMLElement>('.anki-embed-status-pill');
+		if (statusPill && currentCard && !this.isLiveSync) {
+			const status = this.getCardStatusPill(currentCard);
+			statusPill.className = `anki-embed-status-pill ${status.cls}`;
+			statusPill.textContent = status.label;
+			statusPill.setAttribute('title', status.title);
+		}
+
+		const shouldShowCounts = this.config.counts ?? this.settings.showCardCounts;
+		if (!shouldShowCounts) return;
+		const counts = this.currentCounts ?? this.calculateSessionCounts();
+		const newEl = this.footerEl.querySelector('.anki-count-new');
+		if (newEl) {
+			newEl.textContent = String(counts.new);
+			newEl.setAttribute('title', `${counts.new} new cards`);
+		}
+		const learnEl = this.footerEl.querySelector('.anki-count-learn');
+		if (learnEl) {
+			learnEl.textContent = String(counts.learn);
+			learnEl.setAttribute('title', `${counts.learn} learning/relearning cards`);
+		}
+		const reviewEl = this.footerEl.querySelector('.anki-count-review');
+		if (reviewEl) {
+			reviewEl.textContent = String(counts.review);
+			reviewEl.setAttribute('title', `${counts.review} review cards`);
+		}
+		let earlyEl = this.footerEl.querySelector<HTMLElement>('.anki-count-early');
+		if (counts.early && counts.early > 0) {
+			if (!earlyEl) {
+				const countsContainer = this.footerEl.querySelector('.anki-embed-counts');
+				if (countsContainer) {
+					countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+					earlyEl = countsContainer.createSpan({ cls: 'anki-count-early' });
+				}
+			}
+			if (earlyEl) {
+				earlyEl.textContent = String(counts.early);
+				earlyEl.setAttribute('title', `${counts.early} future review cards (early)`);
+			}
+		} else if (earlyEl) {
+			earlyEl.previousElementSibling?.remove();
+			earlyEl.remove();
+		}
+	}
+
+	private restartCardTimerIfActive(): void {
+		const timerPill = this.container.querySelector<HTMLElement>('.anki-embed-timer-pill');
+		if (!timerPill) return;
+		const clockEl = timerPill.querySelector<HTMLElement>('.anki-timer-clock');
+		const timerTextEl = timerPill.querySelector<HTMLElement>('.anki-timer-seconds');
+		const streakEl = timerPill.querySelector<HTMLElement>('.anki-timer-streak');
+		if (clockEl && timerTextEl && streakEl) {
+			timerPill.removeClass('is-warning');
+			timerPill.removeClass('is-overtime');
+			timerPill.removeClass('is-paused');
+			timerPill.addClass('is-normal');
+			clockEl.setText('⏱️');
+			timerTextEl.setText('0.0s');
+			streakEl.setText(`⚡ ${this.timeStreak}`);
+			this.startCardTimer(timerPill, clockEl, timerTextEl, streakEl);
+		}
+	}
+
+	private async renderCardContent(card: AnkiCardInfo, cardContainer: HTMLElement): Promise<void> {
+		const isCloze = isClozeCard(card);
 		if (!this.showingAnswer) {
-			this.cardStartTime = Date.now();
-		}
-
-		if (this.currentIndex >= this.cards.length) {
-			this.renderCompleted();
-			return;
-		}
-
-		const card = this.cards[this.currentIndex];
-		if (!card) return;
-
-		this.renderHeader(card.deckName || this.config.deck, true);
-
-		const cardEl = this.container.createDiv({ cls: 'anki-embed-card card' });
-
-		const qDiv = cardEl.createDiv({ cls: 'anki-embed-question' });
-		qDiv.empty();
-		const qFragment = await this.getResolvedMediaFragment(formatCardHtml(card.question));
-		qDiv.appendChild(qFragment);
-
-		if (this.showingAnswer) {
-			cardEl.createDiv({ cls: 'anki-embed-separator' });
-			const aDiv = cardEl.createDiv({ cls: 'anki-embed-answer' });
-			aDiv.empty();
-			const answerHtml = extractAnswerHtml(formatCardHtml(card.answer, card.question));
-			const aFragment = await this.getResolvedMediaFragment(answerHtml);
+			cardContainer.empty();
+			const qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
+			const qFragment = await this.getQuestionFragment(card);
+			qDiv.appendChild(qFragment);
+			this.prepareAnswerFragment(card);
+		} else if (isCloze) {
+			cardContainer.empty();
+			const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer anki-embed-cloze-answer' });
+			const aFragment = await this.getAnswerFragment(card);
 			aDiv.appendChild(aFragment);
+		} else {
+			let qDiv = cardContainer.querySelector<HTMLElement>('.anki-embed-question');
+			if (!qDiv) {
+				cardContainer.empty();
+				qDiv = cardContainer.createDiv({ cls: 'anki-embed-question' });
+				const qFragment = await this.getQuestionFragment(card);
+				qDiv.appendChild(qFragment);
+			}
+			if (!cardContainer.querySelector('.anki-embed-answer')) {
+				cardContainer.createEl('hr', { cls: 'anki-embed-separator' });
+				const aDiv = cardContainer.createDiv({ cls: 'anki-embed-answer' });
+				const aFragment = await this.getAnswerFragment(card);
+				aDiv.appendChild(aFragment);
+			}
 		}
+	}
 
-		const footer = this.container.createDiv({ cls: 'anki-embed-footer' });
+	private async renderCardInLightDom(cardEl: HTMLElement, card: AnkiCardInfo): Promise<void> {
+		cardEl.addClass('card');
+		const fontScale = this.config.fontScale ?? this.config.scale ?? this.config.fontSize ?? this.settings.cardFontScale ?? 1.0;
+		if (fontScale !== 1) {
+			cardEl.style.setProperty('--anki-card-zoom', String(fontScale));
+		}
+		await this.renderCardContent(card, cardEl);
+	}
 
+	private renderFooterControls(controlsContainer: HTMLElement, card: AnkiCardInfo): void {
+		controlsContainer.empty();
 		if (!this.showingAnswer) {
-			const flipBtn = footer.createEl('button', {
+			const flipBtn = controlsContainer.createEl('button', {
 				cls: 'anki-embed-flip-btn',
 				text: 'Show answer',
 			});
 			flipBtn.onclick = () => { void this.revealAnswer(); };
 
-			const hint = footer.createDiv({ cls: 'anki-embed-shortcut-hint' });
+			const hint = controlsContainer.createDiv({ cls: 'anki-embed-shortcut-hint' });
 			hint.createSpan({ text: 'Shortcut: Press Space to reveal answer' });
 			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
 		} else {
-			const ratings = footer.createDiv({ cls: 'anki-embed-ratings' });
+			const ratings = controlsContainer.createDiv({ cls: 'anki-embed-ratings' });
 
 			const options: Array<{ ease: 1 | 2 | 3 | 4; label: string; clsName: string; key: string }> = [
 				{ ease: 1, label: 'Again', clsName: 'again', key: '1' },
@@ -602,42 +3490,478 @@ export class DeckPlayer {
 				{ ease: 4, label: 'Easy', clsName: 'easy', key: '4' },
 			];
 
-			for (const opt of options) {
+			for (let i = 0; i < options.length; i++) {
+				const opt = options[i];
+				if (!opt) continue;
 				const btn = ratings.createEl('button', {
 					cls: `anki-embed-rate-btn ${opt.clsName}`,
+					attr: { 'data-ease': String(opt.ease) },
 				});
 				btn.createSpan({ text: opt.label });
 				btn.createSpan({ cls: 'anki-embed-rate-key', text: `[${opt.key}]` });
+				if (card.nextReviews?.[i]) {
+					btn.createSpan({ cls: 'anki-embed-rate-interval', text: card.nextReviews[i] });
+				}
 
 				btn.onclick = () => {
 					void this.rateCurrentCard(opt.ease);
 				};
 			}
 
-			const hint = footer.createDiv({ cls: 'anki-embed-shortcut-hint' });
+			const hint = controlsContainer.createDiv({ cls: 'anki-embed-shortcut-hint' });
 			hint.createSpan({ text: 'Shortcuts: Press 1 for Again, 2 for Hard, 3 for Good, 4 for Easy' });
 			hint.createSpan({ cls: 'anki-embed-keyboard-badge', text: '⌨️ Active' });
 		}
+	}
 
-		const resetRow = footer.createDiv({ cls: 'anki-embed-reset-row' });
-		const resetBtn = resetRow.createEl('button', {
-			cls: 'anki-embed-btn-link',
-			text: '↩ Back to deck selection',
-			attr: { title: 'Reset view and back to deck selection' },
+	private async renderCurrentCard() {
+		this.closeActiveLinksDropdown();
+
+		if (!this.showingAnswer) {
+			this.cardStartTime = Date.now();
+			this.isTimerPaused = false;
+			this.timerPausedElapsedMs = 0;
+			this.timerExceededForCurrentCard = false;
+		}
+
+		if (this.currentIndex >= this.cards.length) {
+			this.headerEl = null;
+			this.cardEl = null;
+			this.footerEl = null;
+			this.currentShadowRoot = null;
+			this.currentCardContainer = null;
+			this.currentModelName = null;
+			this.currentFontScale = null;
+			this.renderCompleted();
+			return;
+		}
+
+		if (this.isLearningMode && !this.isLiveSync && !this.hasAcknowledgedEarlyReviews && this.currentIndex > 0) {
+			const candidateCard = this.cards[this.currentIndex];
+			if (candidateCard && candidateCard.queue === 2 && !this.dueCardIds.has(candidateCard.cardId)) {
+				const remainingPending = this.cards.slice(this.currentIndex).filter(c => c.queue === 1 || c.queue === 3 || this.dueCardIds.has(c.cardId) || c.queue === 0);
+				if (remainingPending.length === 0) {
+					this.renderMilestoneScreen(this.cards.length - this.currentIndex);
+					return;
+				}
+			}
+		}
+
+		const card = this.cards[this.currentIndex];
+		if (!card) return;
+
+		const fontScale = this.config.fontScale ?? this.config.scale ?? this.config.fontSize ?? this.settings.cardFontScale ?? 1.0;
+		const shouldUseCardStyles = this.config.styles ?? this.settings.useCardStyles;
+
+		const isLayoutMounted =
+			this.headerEl !== null &&
+			this.cardEl !== null &&
+			this.footerEl !== null &&
+			this.container.contains(this.headerEl) &&
+			this.container.contains(this.cardEl) &&
+			this.container.contains(this.footerEl) &&
+			this.currentCardContainer !== null;
+
+		// FAST PATH: In-place DOM update when layout is already mounted and model/styles are identical
+		if (isLayoutMounted && this.currentModelName === (card.modelName ?? '') && this.currentFontScale === fontScale) {
+			// Update header in-place
+			if (!this.showingAnswer) {
+				if (this.isAnkiFullscreen) {
+					const remoteBadge = this.container.querySelector<HTMLElement>('.anki-fs-live-badge.is-remote');
+					if (remoteBadge && !this.isLiveSync) {
+						remoteBadge.textContent = `${this.currentIndex + 1} / ${this.cards.length}`;
+					}
+					const modeBtn = this.container.querySelector<HTMLElement>('.anki-fs-nav-mode');
+					if (modeBtn && !this.isLiveSync) {
+						modeBtn.textContent = this.isLearningMode ? '🎯 Learn' : '📋 Browse';
+					}
+					this.updateLinksButton();
+					this.restartCardTimerIfActive();
+				} else {
+					const badgeEl = this.headerEl!.querySelector<HTMLElement>('.anki-embed-badge:not(.anki-embed-badge-live):not(.anki-embed-mode-pill)');
+					if (badgeEl) {
+						badgeEl.textContent = `${this.currentIndex + 1} / ${this.cards.length}`;
+					}
+					const modePill = this.headerEl!.querySelector<HTMLElement>('.anki-embed-mode-pill');
+					if (modePill && !this.isLiveSync) {
+						modePill.className = `anki-embed-badge anki-embed-mode-pill is-clickable ${this.isLearningMode ? 'is-learning' : 'is-browse'}`;
+						modePill.textContent = this.isLearningMode ? '🎯 Learn' : '📋 Browse';
+						modePill.setAttribute(
+							'title',
+							this.isLearningMode
+								? 'Mode: Learning (Anki steps & due priority). Click to switch to browse mode'
+								: 'Mode: Browse (linear preview). Click to switch to learning mode'
+						);
+					}
+					this.updateFlagButton(card);
+					this.updateLinksButton();
+					this.restartCardTimerIfActive();
+				}
+				if (this.cardEl) {
+					this.cardEl.scrollTop = 0;
+				}
+			}
+
+			// Update card class (e.g. ord-based class)
+			const isNightMode = typeof document !== 'undefined' && document.body.classList.contains('theme-dark');
+			const ordClass = typeof card.ord === 'number' ? `card${card.ord + 1}` : '';
+			this.currentCardContainer!.className = `card ${ordClass} ${isNightMode ? 'nightMode night_mode' : ''}`.trim();
+
+			// Update card question/answer in-place
+			await this.renderCardContent(card, this.currentCardContainer!);
+			this.updateCardFlagIndicator(card);
+
+			// Update footer controls in-place
+			const controlsContainer = this.footerEl!.querySelector<HTMLElement>('.anki-embed-footer-controls');
+			if (controlsContainer) {
+				this.renderFooterControls(controlsContainer, card);
+			}
+			this.updateCountsDisplay(card);
+
+			this.preparseNextCard();
+			return;
+		}
+
+		// SLOW / INITIAL MOUNT PATH: Full build
+		this.container.empty();
+
+		if (this.isAnkiFullscreen) {
+			this.renderAnkiFullscreenTopBar();
+		} else {
+			this.renderHeader(this.config.deck || card.deckName, true);
+		}
+		this.headerEl = this.container.querySelector<HTMLElement>('.anki-embed-header, .anki-fs-topbar');
+
+		const cardEl = this.container.createDiv({ cls: 'anki-embed-card' });
+		this.cardEl = cardEl;
+		if (this.settings.minCardHeight) {
+			cardEl.style.minHeight = this.settings.minCardHeight;
+		}
+
+		if (fontScale !== 1) {
+			cardEl.style.setProperty('--anki-card-zoom', String(fontScale));
+		}
+
+		cardEl.addEventListener('contextmenu', (evt: MouseEvent) => {
+			const cur = this.cards[this.currentIndex];
+			if (cur) {
+				this.showCardContextMenu(evt, cur);
+			}
 		});
-		resetBtn.onclick = () => {
-			this.resetToDeckPicker();
-		};
+
+		this.currentModelName = card.modelName ?? '';
+		this.currentFontScale = fontScale;
+
+		if (shouldUseCardStyles && typeof cardEl.attachShadow === 'function') {
+			try {
+				cardEl.addClass('anki-embed-card-custom');
+				const shadow = cardEl.attachShadow({ mode: 'open' });
+				this.currentShadowRoot = shadow;
+
+				const normalizedCss = await this.getNormalizedCardCss(card);
+
+				const baseCardCss = `
+:host {
+	display: block;
+	width: 100%;
+	height: 100%;
+	min-height: 0;
+	margin: 0 !important;
+	padding: 0 !important;
+	border-radius: var(--radius-s, 6px);
+	overflow-x: auto;
+	overflow-y: auto;
+	box-sizing: border-box;
+	--anki-card-zoom: ${fontScale};
+}
+.card {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	font-family: var(--font-text);
+	font-size: 1.05em;
+	zoom: var(--anki-card-zoom, ${fontScale});
+	line-height: 1.6;
+	text-align: left;
+	word-wrap: break-word;
+	hyphens: auto;
+	padding: ${this.isFullView ? (this.isAnkiFullscreen ? '32px 32px 16px 32px' : '8px 16px') : '20px'};
+	min-height: 100%;
+	height: auto;
+	box-sizing: border-box;
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+}
+.card.nightMode,
+.card.night_mode {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+}
+.anki-embed-question,
+.anki-embed-answer {
+	width: 100%;
+}
+.anki-embed-answer {
+	margin-top: 12px;
+}
+.anki-embed-separator {
+	width: 80%;
+	border: 0;
+	height: 1px;
+	background: var(--background-modifier-border);
+	margin: 14px auto;
+}
+.cloze {
+	color: var(--interactive-accent);
+	font-weight: bold;
+}
+img {
+	max-width: 100%;
+	height: auto;
+	border-radius: 4px;
+	margin: 8px 0;
+}
+${normalizedCss}
+
+.card {
+	min-height: 100% !important;
+	height: auto !important;
+	box-sizing: border-box !important;
+	margin: 0 !important;
+	margin-top: 0 !important;
+	margin-bottom: 0 !important;
+	margin-left: 0 !important;
+	margin-right: 0 !important;
+	width: 100% !important;
+	max-width: 100% !important;
+	border-radius: var(--radius-s, 6px) !important;
+	position: relative !important;
+}
+
+.anki-card-flag-badge {
+	position: absolute;
+	top: 10px;
+	right: 14px;
+	z-index: 50;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 4px;
+	user-select: none;
+	background-color: transparent;
+	transition: transform 0.12s ease, opacity 0.15s ease, background-color 0.12s ease;
+}
+.anki-card-flag-badge:hover {
+	transform: scale(1.15);
+	background-color: var(--background-modifier-hover, rgba(128, 128, 128, 0.15));
+}
+.anki-card-flag-badge svg {
+	width: 18px;
+	height: 18px;
+	display: block;
+	fill: currentColor;
+	stroke: currentColor;
+}
+.anki-card-flag-badge.is-empty {
+	opacity: 0;
+}
+.card:hover .anki-card-flag-badge.is-empty {
+	opacity: 0.35;
+}
+.card:hover .anki-card-flag-badge.is-empty:hover {
+	opacity: 1;
+}
+.anki-card-flag-badge.is-empty svg {
+	fill: none;
+	stroke: var(--text-muted, #888);
+}
+.anki-flag-1 { color: #e53935; }
+.nightMode .anki-flag-1, .night_mode .anki-flag-1 { color: #ff5252; }
+.anki-flag-2 { color: #fb8c00; }
+.nightMode .anki-flag-2, .night_mode .anki-flag-2 { color: #ffa726; }
+.anki-flag-3 { color: #43a047; }
+.nightMode .anki-flag-3, .night_mode .anki-flag-3 { color: #66bb6a; }
+.anki-flag-4 { color: #1e88e5; }
+.nightMode .anki-flag-4, .night_mode .anki-flag-4 { color: #42a5f5; }
+.anki-flag-5 { color: #d81b60; }
+.nightMode .anki-flag-5, .night_mode .anki-flag-5 { color: #ec407a; }
+.anki-flag-6 { color: #00acc1; }
+.nightMode .anki-flag-6, .night_mode .anki-flag-6 { color: #26c6da; }
+.anki-flag-7 { color: #8e24aa; }
+.nightMode .anki-flag-7, .night_mode .anki-flag-7 { color: #ab47bc; }
+`;
+				if ('adoptedStyleSheets' in shadow && typeof CSSStyleSheet !== 'undefined') {
+					const sheet = new CSSStyleSheet();
+					sheet.replaceSync(baseCardCss);
+					shadow.adoptedStyleSheets = [sheet];
+				}
+
+				const isNightMode = typeof document !== 'undefined' && document.body.classList.contains('theme-dark');
+				const ordClass = typeof card.ord === 'number' ? `card${card.ord + 1}` : '';
+				const cardContainer = (shadow as Node).createDiv({
+					cls: `card ${ordClass} ${isNightMode ? 'nightMode night_mode' : ''}`.trim(),
+				});
+				this.currentCardContainer = cardContainer;
+
+				cardContainer.addEventListener('contextmenu', (evt: MouseEvent) => {
+					const cur = this.cards[this.currentIndex];
+					if (cur) {
+						this.showCardContextMenu(evt, cur);
+					}
+				});
+
+				await this.renderCardContent(card, cardContainer);
+				this.updateCardFlagIndicator(card);
+			} catch {
+				this.currentShadowRoot = null;
+				this.currentCardContainer = cardEl;
+				await this.renderCardInLightDom(cardEl, card);
+				this.updateCardFlagIndicator(card);
+			}
+		} else {
+			this.currentShadowRoot = null;
+			this.currentCardContainer = cardEl;
+			await this.renderCardInLightDom(cardEl, card);
+			this.updateCardFlagIndicator(card);
+		}
+
+		if (this.isAnkiFullscreen) {
+			this.renderAnkiFullscreenFooter(card);
+		} else {
+			const footer = this.container.createDiv({ cls: 'anki-embed-footer' });
+			this.footerEl = footer;
+
+			const shouldShowCounts = this.config.counts ?? this.settings.showCardCounts;
+			const countsContainer = footer.createDiv({ cls: 'anki-embed-counts' });
+
+			if (!this.isLiveSync) {
+				const status = this.getCardStatusPill(card);
+				countsContainer.createSpan({
+					cls: `anki-embed-status-pill ${status.cls}`,
+					text: status.label,
+					attr: { title: status.title },
+				});
+				if (shouldShowCounts) {
+					countsContainer.createSpan({ cls: 'anki-count-sep', text: '•' });
+				}
+			}
+
+			if (shouldShowCounts) {
+				const counts = this.currentCounts ?? this.calculateSessionCounts();
+
+				const newEl = countsContainer.createSpan({ cls: 'anki-count-new', text: String(counts.new) });
+				newEl.setAttribute('title', `${counts.new} new cards`);
+
+				countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+
+				const learnEl = countsContainer.createSpan({ cls: 'anki-count-learn', text: String(counts.learn) });
+				learnEl.setAttribute('title', `${counts.learn} learning/relearning cards`);
+
+				countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+
+				const reviewEl = countsContainer.createSpan({ cls: 'anki-count-review', text: String(counts.review) });
+				reviewEl.setAttribute('title', `${counts.review} review cards`);
+
+				if (counts.early && counts.early > 0) {
+					countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+					const earlyEl = countsContainer.createSpan({ cls: 'anki-count-early', text: String(counts.early) });
+					earlyEl.setAttribute('title', `${counts.early} future review cards (early)`);
+				}
+			}
+
+			const controlsContainer = footer.createDiv({ cls: 'anki-embed-footer-controls' });
+			this.renderFooterControls(controlsContainer, card);
+
+			if (!this.isFullView) {
+				const resetRow = footer.createDiv({ cls: 'anki-embed-reset-row' });
+				const resetBtn = resetRow.createEl('button', {
+					cls: 'anki-embed-btn-link',
+					text: '↩ Back to deck selection',
+					attr: { title: 'Reset view and back to deck selection' },
+				});
+				resetBtn.onclick = () => {
+					this.resetToDeckPicker();
+				};
+			}
+		}
+
+		if (this.isAnkiFullscreen && this.activeSideNoteFile) {
+			void this.openFullscreenSideNote(this.activeSideNoteFile);
+		}
+
+		this.preparseNextCard();
 	}
 
 	private async revealAnswer() {
 		this.showingAnswer = true;
+		if (this.isLiveSync) {
+			this.lastUserActionTimestamp = Date.now();
+			void this.client.guiShowAnswer().catch(() => {});
+		}
 		await this.renderCurrentCard();
 	}
 
 	private async rateCurrentCard(ease: 1 | 2 | 3 | 4): Promise<void> {
-		const timeTaken = this.cardStartTime > 0 ? Date.now() - this.cardStartTime : undefined;
+		const isFlashEnabled = this.config.flash ?? this.settings.enableRatingFlash;
+		if (isFlashEnabled) {
+			const targetBtn = this.container.querySelector<HTMLElement>(`.anki-embed-rate-btn[data-ease="${ease}"]`);
+			if (targetBtn) {
+				const transitionMs = this.config.flashTransition ?? this.settings.ratingFlashTransitionMs;
+				targetBtn.style.setProperty('--anki-flash-transition', `${transitionMs}ms`);
+				targetBtn.addClass('is-flashing');
+				const durationMs = this.config.flashDuration ?? this.settings.ratingFlashDurationMs;
+				if (durationMs > 0) {
+					window.setTimeout(() => {
+						targetBtn.removeClass('is-flashing');
+					}, durationMs);
+				}
+			}
+		}
+
+		const timeTaken = this.isTimerPaused
+			? this.timerPausedElapsedMs
+			: (this.cardStartTime > 0 ? Date.now() - this.cardStartTime : undefined);
+		const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+		const prevTimeStreak = this.timeStreak;
+
+		// Offline learn mode records the answer in Anki. Save it before moving on, so a failed
+		// save leaves the card on screen (nothing counted) instead of silently skipping it.
+		const answeredCard = this.cards[this.currentIndex];
+		let cardAfterAnswer: AnkiCardInfo | undefined;
+		if (!this.isLiveSync && this.isLearningMode && answeredCard) {
+			if (this.isSavingAnswer) return;
+			this.isSavingAnswer = true;
+			try {
+				const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;
+				await this.client.answerCard(answeredCard.cardId, ease, timeParam);
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				new Notice(`Couldn't save your answer to Anki, so this card wasn't graded. Make sure Anki is open, then try again. (${msg})`, 8000);
+				return;
+			} finally {
+				this.isSavingAnswer = false;
+			}
+			cardAfterAnswer = (await this.client.getCardsInfo([answeredCard.cardId]).catch(() => []))[0];
+		} else if (!this.isLiveSync && !this.isLearningMode && !this.hasShownBrowseNotice) {
+			this.hasShownBrowseNotice = true;
+			new Notice("Browse mode doesn't save answers to Anki. Switch to learn mode to record reviews.");
+		}
+
+		if (timeTaken !== undefined) {
+			const timeTakenSec = timeTaken / 1000;
+			if (!this.timerExceededForCurrentCard && timeTakenSec <= limitSec) {
+				this.timeStreak++;
+			} else {
+				this.timeStreak = 0;
+			}
+		}
+		this.stopCardTimer();
 		this.cardStartTime = 0;
+		this.isTimerPaused = false;
+		this.timerPausedElapsedMs = 0;
 
 		if (ease === 1) this.sessionStats.again++;
 		else if (ease === 2) this.sessionStats.hard++;
@@ -646,17 +3970,2061 @@ export class DeckPlayer {
 
 		const card = this.cards[this.currentIndex];
 		if (card) {
+			this.reviewHistory.push({
+				card,
+				index: this.currentIndex,
+				statsDelta: ease,
+				timeStreakBefore: prevTimeStreak,
+			});
+		}
+
+		if (this.isLiveSync) {
+			this.isReviewingLiveCard = true;
+			this.lastUserActionTimestamp = Date.now();
 			try {
-				const timeParam = this.settings.useCustomAnkiConnect ? timeTaken : undefined;
-				await this.client.answerCard(card.cardId, ease, timeParam);
-			} catch (err) {
-				console.warn('Failed to record card answer in Anki:', err);
+				if (!this.showingAnswer) {
+					await this.client.guiShowAnswer();
+				}
+				const nextCard = await this.client.guiAnswerAndCurrentCard(ease);
+				this.showingAnswer = false;
+				if (nextCard) {
+					this.cards = [nextCard];
+					this.currentIndex = 0;
+					await this.renderCurrentCard();
+					window.setTimeout(() => {
+						void this.updateCounts(nextCard.deckName || this.config.deck);
+					}, 20);
+				} else {
+					this.cards = [];
+					this.renderCompleted();
+				}
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (msg.toLowerCase().includes('not currently active')) {
+					this.cards = [];
+					this.renderCompleted();
+				} else {
+					this.renderError(msg);
+				}
+			} finally {
+				this.isReviewingLiveCard = false;
 			}
+			return;
+		}
+
+		// A card still in learning comes back a few cards later in this session.
+		if (cardAfterAnswer && (cardAfterAnswer.queue === 1 || cardAfterAnswer.queue === 3)) {
+			const remaining = this.cards.length - (this.currentIndex + 1);
+			const insertIdx = this.currentIndex + 1 + Math.min(3, remaining);
+			this.cards.splice(insertIdx, 0, cardAfterAnswer);
 		}
 
 		this.currentIndex++;
 		this.showingAnswer = false;
+		const activeDeck = this.config.deck || card?.deckName;
+		void this.updateCounts(activeDeck);
 		await this.renderCurrentCard();
+	}
+
+	public toggleAnkiFullscreen(enable?: boolean): void {
+		const target = enable ?? !this.isAnkiFullscreen;
+		this.isAnkiFullscreen = target;
+
+		if (this.isAnkiFullscreen) {
+			this.container.addClass('is-anki-fullscreen');
+			this.container.addClass('is-full-view');
+			if (typeof document !== 'undefined' && !document.fullscreenElement) {
+				const targetEl = this.container;
+				if (targetEl.requestFullscreen) {
+					targetEl.requestFullscreen().then(() => {
+						this.wasNativeFullscreen = true;
+					}).catch(() => {
+						this.wasNativeFullscreen = false;
+					});
+				}
+			}
+			new Notice('Entered Anki fullscreen mode (f11 or esc to exit)');
+		} else {
+			this.closeFullscreenSideNote();
+			this.container.removeClass('is-anki-fullscreen');
+			if (!this.isFullView) {
+				this.container.removeClass('is-full-view');
+			}
+			if (typeof document !== 'undefined' && document.fullscreenElement) {
+				document.exitFullscreen().catch(() => {});
+			}
+			this.wasNativeFullscreen = false;
+			new Notice('Exited Anki fullscreen mode');
+		}
+
+		this.headerEl = null;
+		this.cardEl = null;
+		this.footerEl = null;
+		this.currentShadowRoot = null;
+		this.currentCardContainer = null;
+		this.currentModelName = null;
+		this.currentFontScale = null;
+
+		if (this.cards.length > 0 && this.currentIndex < this.cards.length) {
+			void this.renderCurrentCard();
+		} else if (this.cards.length === 0) {
+			void this.renderDeckPicker();
+		}
+	}
+
+	private showFullscreenToast(message: string, durationMs: number = 2400): void {
+		const existing = this.container.querySelectorAll('.anki-fs-toast');
+		existing.forEach((el) => el.remove());
+
+		const toast = this.container.createDiv({ cls: 'anki-fs-toast' });
+		toast.setText(message);
+
+		window.setTimeout(() => {
+			if (toast.isConnected) {
+				toast.addClass('is-fading-out');
+				window.setTimeout(() => {
+					toast.remove();
+				}, 320);
+			}
+		}, durationMs);
+	}
+
+	private renderAnkiFullscreenTopBar(): void {
+		const topbar = this.container.createDiv({ cls: 'anki-fs-topbar' });
+		const navPill = topbar.createDiv({ cls: 'anki-fs-nav-pill' });
+
+		const decksBtn = navPill.createEl('button', {
+			cls: 'anki-fs-nav-btn anki-fs-nav-decks',
+			text: 'Decks',
+			attr: { title: 'Back to deck selection' },
+		});
+		decksBtn.onclick = () => {
+			this.resetToDeckPicker();
+		};
+
+		if (this.cards.length > 0) {
+			if (this.isLiveSync) {
+				const liveBadge = navPill.createEl('button', {
+					cls: 'anki-fs-nav-btn anki-fs-live-badge is-live',
+					text: '⚡ Live sync',
+					attr: { title: 'Live sync with Anki desktop is on (click to switch to remote deck mode)' },
+				});
+				liveBadge.onclick = () => {
+					this.config.live = false;
+					this.hasStarted = true;
+					void this.loadCards();
+				};
+			} else {
+				const remoteBadge = navPill.createEl('button', {
+					cls: 'anki-fs-nav-btn anki-fs-live-badge is-remote',
+					text: `${this.currentIndex + 1} / ${this.cards.length}`,
+					attr: { title: 'Remote deck mode (click to switch to live sync with Anki desktop)' },
+				});
+				remoteBadge.onclick = () => {
+					void this.switchToLiveMode();
+				};
+
+				const modeBtn = navPill.createEl('button', {
+					cls: `anki-fs-nav-btn anki-fs-nav-mode ${this.isLearningMode ? 'is-learning' : 'is-browse'}`,
+					text: this.isLearningMode ? '🎯 Learn' : '📋 Browse',
+					attr: {
+						title: this.isLearningMode
+							? 'Mode: Learning (Anki steps & due priority). Click to switch to browse mode, right-click to change order'
+							: 'Mode: Browse (linear preview). Click to switch to learning mode',
+					},
+				});
+				modeBtn.onclick = (e) => {
+					e.stopPropagation();
+					this.isLearningMode = !this.isLearningMode;
+					this.showFullscreenToast(this.isLearningMode ? 'Switched to learning mode' : 'Switched to browse mode');
+					void this.loadCards();
+				};
+				modeBtn.addEventListener('contextmenu', (e: MouseEvent) => {
+					e.preventDefault();
+					e.stopPropagation();
+					const menu = new Menu();
+					const currentOrder = this.config.learningOrder ?? this.settings.learningOrder ?? 'due-new-future';
+					menu.addItem((item) => {
+						item.setTitle('Due > new > future reviews')
+							.setChecked(currentOrder === 'due-new-future')
+							.onClick(() => {
+								this.config.learningOrder = 'due-new-future';
+								this.showFullscreenToast('Learning order: Due > new > future reviews');
+								void this.loadCards();
+							});
+					});
+					menu.addItem((item) => {
+						item.setTitle('Due > future reviews > new')
+							.setChecked(currentOrder === 'due-future-new')
+							.onClick(() => {
+								this.config.learningOrder = 'due-future-new';
+								this.showFullscreenToast('Learning order: Due > future reviews > new');
+								void this.loadCards();
+							});
+					});
+					menu.showAtMouseEvent(e);
+				});
+			}
+		}
+
+		const linksBadge = navPill.createEl('button', {
+			cls: 'anki-fs-nav-btn anki-fs-links-indicator',
+			text: 'Links',
+			attr: { title: 'Linked notes (click to open)' },
+		});
+		linksBadge.onclick = (e) => {
+			e.stopPropagation();
+			const activeCard = this.cards[this.currentIndex];
+			if (activeCard) {
+				this.openCardLinksDropdown(linksBadge, activeCard);
+			}
+		};
+		this.updateFullscreenTopPillLinks();
+
+		const syncBtn = navPill.createEl('button', {
+			cls: 'anki-fs-nav-btn anki-fs-sync',
+			text: 'Sync',
+			attr: { title: 'Sync with Anki' },
+		});
+		syncBtn.onclick = async () => {
+			syncBtn.setText('⏳');
+			try {
+				await this.client.sync();
+				this.showFullscreenToast('Anki sync complete');
+				const activeDeck = this.config.deck || this.cards[0]?.deckName;
+				if (activeDeck) {
+					void this.updateCounts(activeDeck);
+				}
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.showFullscreenToast(`Anki sync failed: ${msg}`);
+			} finally {
+				syncBtn.setText('Sync');
+			}
+		};
+
+		const exitBtn = navPill.createEl('button', {
+			cls: 'anki-fs-nav-btn anki-fs-exit',
+			text: 'Exit ⛶',
+			attr: { title: 'Exit Anki fullscreen mode (esc)' },
+		});
+		exitBtn.onclick = () => {
+			this.toggleAnkiFullscreen(false);
+		};
+	}
+
+	private renderAnkiFullscreenFooter(card: AnkiCardInfo): void {
+		const footer = this.container.createDiv({ cls: 'anki-embed-footer anki-fs-footer' });
+		this.footerEl = footer;
+
+		if (this.activeSideNoteFile) {
+			const sideNoteEl = this.container.querySelector<HTMLElement>('.anki-fs-side-note');
+			if (sideNoteEl) {
+				const footerHeight = footer.offsetHeight || 64;
+				sideNoteEl.setCssStyles({ bottom: `${footerHeight}px` });
+			}
+		}
+
+		// Left column - links and remote icon
+		const leftCol = footer.createDiv({ cls: 'anki-fs-footer-left' });
+		const shouldShowLinks = this.config.links ?? this.settings.enableCardLinks;
+		if (shouldShowLinks) {
+			this.renderLinksButton(leftCol, card);
+		}
+
+		const isGamepadConfigured = this.config.remote ?? this.settings.enableGamepad;
+		if (isGamepadConfigured) {
+			const remoteBadge = leftCol.createSpan({
+				cls: `anki-embed-gamepad-badge anki-fs-remote-badge ${this.connectedGamepadName ? 'is-connected' : ''}`,
+				text: this.connectedGamepadName ? '🎮 Remote connected' : '🎮 Remote',
+				attr: {
+					title: this.connectedGamepadName
+						? `🎮 Controller: ${this.connectedGamepadName} (click to customize buttons)`
+						: '🎮 Anki remote / gamepad enabled (click to test and customize buttons)',
+				},
+			});
+			if (this.app) {
+				remoteBadge.onclick = () => {
+					new AnkiRemoteConfigModal(this.app!, {
+						settings: this.settings,
+						saveData: async (updated) => {
+							this.settings = updated;
+							if (this.saveSettings) {
+								await this.saveSettings(updated);
+							}
+						},
+					}).open();
+				};
+			}
+		}
+
+		// Center column
+		const centerCol = footer.createDiv({ cls: 'anki-fs-footer-center' });
+		const countsContainer = centerCol.createDiv({ cls: 'anki-fs-counts' });
+		const counts = this.currentCounts ?? this.calculateSessionCounts();
+
+		const newEl = countsContainer.createSpan({ cls: 'anki-count-new', text: String(counts.new) });
+		newEl.setAttribute('title', `${counts.new} new cards`);
+
+		countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+
+		const learnEl = countsContainer.createSpan({ cls: 'anki-count-learn', text: String(counts.learn) });
+		learnEl.setAttribute('title', `${counts.learn} learning/relearning cards`);
+
+		countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+
+		const reviewEl = countsContainer.createSpan({ cls: 'anki-count-review', text: String(counts.review) });
+		reviewEl.setAttribute('title', `${counts.review} review cards`);
+
+		if (counts.early && counts.early > 0) {
+			countsContainer.createSpan({ cls: 'anki-count-sep', text: '+' });
+			const earlyEl = countsContainer.createSpan({ cls: 'anki-count-early', text: String(counts.early) });
+			earlyEl.setAttribute('title', `${counts.early} future review cards (early)`);
+		}
+
+		const controlsContainer = centerCol.createDiv({ cls: 'anki-embed-footer-controls anki-fs-controls' });
+		this.renderFooterControls(controlsContainer, card);
+
+		// Right column
+		const rightCol = footer.createDiv({ cls: 'anki-fs-footer-right' });
+
+		const shouldShowTimer = this.config.timer ?? this.settings.enableCardTimer;
+		if (shouldShowTimer) {
+			const warningSec = this.config.timerWarning ?? this.settings.timerWarningSeconds;
+			const limitSec = this.config.timerLimit ?? this.settings.timerLimitSeconds;
+			const timerPill = rightCol.createDiv({
+				cls: `anki-embed-timer-pill anki-fs-timer-pill ${this.isTimerPaused ? 'is-paused' : 'is-normal'}`,
+				attr: {
+					title: this.isTimerPaused
+						? 'Timer paused (click to resume)'
+						: `Card timer: Warning at ${warningSec}s, Limit at ${limitSec}s (click to pause)`,
+				},
+			});
+			const clockEl = timerPill.createSpan({ cls: 'anki-timer-clock', text: this.isTimerPaused ? '⏸️' : '⏱️' });
+			const elapsedSoFar = this.getCardElapsedSec();
+			const timerTextEl = timerPill.createSpan({
+				cls: 'anki-timer-seconds',
+				text: `${elapsedSoFar.toFixed(1)}s`,
+			});
+			const streakEl = timerPill.createSpan({
+				cls: 'anki-timer-streak',
+				text: `⚡ ${this.timeStreak}`,
+				attr: { title: `Time limit streak: ${this.timeStreak} cards in a row under limit` },
+			});
+
+			timerPill.onclick = () => {
+				this.toggleTimerPause(timerPill, clockEl, timerTextEl, streakEl);
+			};
+
+			this.startCardTimer(timerPill, clockEl, timerTextEl, streakEl);
+		}
+
+		const moreBtn = rightCol.createEl('button', {
+			cls: 'anki-fs-pill-btn',
+			text: 'More ▾',
+			attr: { title: 'Card options and actions' },
+		});
+		moreBtn.onclick = (evt: MouseEvent) => {
+			this.showAnkiMoreMenu(evt, card);
+		};
+
+		const exitBtn = rightCol.createEl('button', {
+			cls: 'anki-fs-pill-btn anki-fs-exit-btn',
+			text: 'Exit ⛶',
+			attr: { title: 'Exit Anki fullscreen mode (esc)' },
+		});
+		exitBtn.onclick = () => {
+			this.toggleAnkiFullscreen(false);
+		};
+	}
+
+	private showAnkiMoreMenu(evt: MouseEvent, card: AnkiCardInfo): void {
+		evt.preventDefault();
+		evt.stopPropagation();
+		const menu = new Menu();
+
+		const isFlagged = (card.flags ?? 0) > 0;
+		const flagConfig = isFlagged ? ANKI_FLAG_CONFIGS[card.flags ?? 0] : null;
+		menu.addItem((item) => {
+			item.setTitle(isFlagged ? `Remove flag (${flagConfig?.name.toLowerCase() ?? ''})` : 'Flag card (f)')
+				.setIcon('flag')
+				.onClick(() => {
+					void this.toggleFlagCurrentCard();
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Card flags and colors')
+				.setIcon('flag')
+				.onClick((e) => {
+					this.showFlagColorMenu(e as MouseEvent, card);
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Bury card (=)')
+				.setIcon('archive')
+				.onClick(async () => {
+					try {
+						await this.client.buryCards([card.cardId]);
+						new Notice('Card buried');
+						this.currentIndex++;
+						this.showingAnswer = false;
+						const activeDeck = this.config.deck || card?.deckName;
+						void this.updateCounts(activeDeck);
+						await this.renderCurrentCard();
+					} catch (err: unknown) {
+						const msg = err instanceof Error ? err.message : String(err);
+						new Notice(`Failed to bury card: ${msg}`);
+					}
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Suspend card (@)')
+				.setIcon('slash')
+				.onClick(async () => {
+					try {
+						await this.client.suspendCards([card.cardId]);
+						new Notice('Card suspended');
+						this.currentIndex++;
+						this.showingAnswer = false;
+						const activeDeck = this.config.deck || card?.deckName;
+						void this.updateCounts(activeDeck);
+						await this.renderCurrentCard();
+					} catch (err: unknown) {
+						const msg = err instanceof Error ? err.message : String(err);
+						new Notice(`Failed to suspend card: ${msg}`);
+					}
+				});
+		});
+
+		if (this.reviewHistory.length > 0) {
+			menu.addItem((item) => {
+				item.setTitle('Undo last review (z)')
+					.setIcon('undo')
+					.onClick(() => {
+						void this.undoLastCard();
+					});
+			});
+		}
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle(this.isLiveSync ? 'Switch to offline mode' : 'Switch to live sync mode')
+				.setIcon(this.isLiveSync ? 'zap-off' : 'zap')
+				.onClick(() => {
+					if (this.isLiveSync) {
+						this.config.live = false;
+						this.hasStarted = true;
+						void this.loadCards();
+					} else {
+						void this.switchToLiveMode();
+					}
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Toggle Anki fullscreen mode (esc)')
+				.setIcon('minimize')
+				.onClick(() => {
+					this.toggleAnkiFullscreen(false);
+				});
+		});
+
+		menu.showAtMouseEvent(evt);
+	}
+
+	private cleanHtmlToMarkdown(html: string): string {
+		if (!html) return '';
+
+		// Strip scripts, styles, tag containers, hints, and ankihub elements
+		let md = html
+			.replace(/<style[\s\S]*?<\/style>/gi, '')
+			.replace(/<script[\s\S]*?<\/script>/gi, '')
+			.replace(/<(?:div|span)\b[^>]*\b(?:id|class)\s*=\s*["']?[^"']*(?:tag|ankihub|hint|button|menu|reveal|toggle)[^"']*["'][^>]*>[\s\S]*?<\/(?:div|span)>/gi, '')
+			.replace(/<a\b[^>]*\bclass\s*=\s*["']?hint["'][^>]*>[\s\S]*?<\/a>/gi, '');
+
+		// Format basic HTML tags to Markdown
+		md = md
+			.replace(/<(?:b|strong)\b[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, '**$1**')
+			.replace(/<(?:i|em)\b[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, '*$1*')
+			.replace(/<u\b[^>]*>([\s\S]*?)<\/u>/gi, '_$1_')
+			.replace(/<sup\b[^>]*>([\s\S]*?)<\/sup>/gi, '$1')
+			.replace(/<sub\b[^>]*>([\s\S]*?)<\/sub>/gi, '$1')
+			.replace(/<br\s*\/?>/gi, '\n')
+			.replace(/<\/p>/gi, '\n\n')
+			.replace(/<p\b[^>]*>/gi, '')
+			.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n')
+			.replace(/<\/?(?:ul|ol)\b[^>]*>/gi, '\n');
+
+		// Remove any remaining HTML tags
+		md = md.replace(/<[^>]+>/g, '');
+
+		// Decode common HTML entities
+		md = md
+			.replace(/&nbsp;/gi, ' ')
+			.replace(/&amp;/gi, '&')
+			.replace(/&lt;/gi, '<')
+			.replace(/&gt;/gi, '>')
+			.replace(/&quot;/gi, '"')
+			.replace(/&#39;/gi, "'")
+			.replace(/&times;/gi, '×')
+			.replace(/&#8618;/gi, '↪');
+
+		// Strip AnKing pseudo-fields, button text, and tag clutter lines
+		md = md
+			.replace(/PSEUDO-FIELD[^\n]*/gi, '')
+			.replace(/Watch\s+[^\n]*/gi, '')
+			.replace(/View Note on AnkiHub/gi, '')
+			.replace(/Reveal Next/gi, '')
+			.replace(/Toggle All/gi, '')
+			.replace(/obsidian_exported[^\n]*/gi, '')
+			.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '')
+			.replace(/#AK_[^\s<>]+/g, '')
+			.replace(/#[\w/:-]{6,}/g, '');
+
+		return md
+			.split('\n')
+			.map(line => line.trim())
+			.filter((line, i, arr) => !(line === '' && arr[i - 1] === ''))
+			.join('\n')
+			.trim();
+	}
+
+	private renderClozeContent(text: string, targetOrd: number, isAnswer: boolean): string {
+		const targetIndex = targetOrd + 1;
+		const clozeRegex = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+
+		return text.replace(clozeRegex, (_match: string, numStr: string, answerText: string, hintText?: string): string => {
+			const num = Number.parseInt(numStr, 10);
+			if (num === targetIndex) {
+				if (isAnswer) {
+					return `**${(answerText ?? '').trim()}**`;
+				} else {
+					return hintText ? `**[${hintText.trim()}]**` : '**[...]**';
+				}
+			} else {
+				return (answerText ?? '').trim();
+			}
+		});
+	}
+
+	private extractTagsFromCard(card: AnkiCardInfo): string[] {
+		const cleanedTags = new Set<string>();
+
+		if (card.tags && Array.isArray(card.tags)) {
+			for (const t of card.tags) {
+				const clean = normalizeAnkiTag(t);
+				if (clean) cleanedTags.add(clean);
+			}
+		}
+
+		const cached = this.cardTagsCache.get(card.cardId);
+		if (cached && Array.isArray(cached)) {
+			for (const t of cached) {
+				const clean = normalizeAnkiTag(t);
+				if (clean) cleanedTags.add(clean);
+			}
+		}
+
+		const raw = `${card.question} ${card.answer}`;
+		const tagMatches = raw.match(/#AK_[A-Za-z0-9_:#&/.-]+/g) || [];
+
+		for (const tag of tagMatches) {
+			const clean = tag.replace(/^#+/, '').replace(/::#+/g, '::').trim();
+			if (clean.length > 3) {
+				cleanedTags.add(clean);
+			}
+		}
+
+		return Array.from(cleanedTags);
+	}
+
+	public getCardTagsSync(cardId: number, card?: AnkiCardInfo): string[] {
+		if (this.realTagsLoaded.has(cardId)) {
+			return this.cardTagsCache.get(cardId) ?? [];
+		}
+		const c = card || this.cards.find((item) => item.cardId === cardId);
+		if (!c) {
+			return this.cardTagsCache.get(cardId) ?? [];
+		}
+		const tags = this.extractTagsFromCard(c);
+		if (tags.length > 0) {
+			this.cardTagsCache.set(cardId, tags);
+		}
+		return tags;
+	}
+
+	/**
+	 * Load the card's real tags from Anki. Until then, tags are scraped from the card's HTML, which
+	 * only works for note types that print their tags and can cut tags short.
+	 */
+	public async ensureCardTagsLoaded(cardId: number, card?: AnkiCardInfo): Promise<string[]> {
+		if (this.realTagsLoaded.has(cardId)) {
+			return this.cardTagsCache.get(cardId) ?? [];
+		}
+		const syncTags = this.getCardTagsSync(cardId, card);
+
+		try {
+			const rawTags = await this.client.getCardTags(cardId);
+			if (rawTags) {
+				const fetched = rawTags.map((t) => normalizeAnkiTag(t)).filter(Boolean);
+				this.cardTagsCache.set(cardId, fetched);
+				this.realTagsLoaded.add(cardId);
+				const currentCard = this.cards.find((c) => c.cardId === cardId);
+				if (currentCard) {
+					currentCard.tags = rawTags;
+				}
+				return fetched;
+			}
+		} catch {
+			// Anki unreachable: keep the scraped tags
+		}
+		return syncTags;
+	}
+
+	private extractCardContent(card: AnkiCardInfo): {
+		question: string;
+		answer: string;
+		extra?: string;
+		lectureNotes?: string;
+		missedQuestions?: string;
+	} {
+		// 1. If Cloze card with Text field
+		if (card.fields?.Text?.value) {
+			const ord = card.ord ?? 0;
+			const rawText = card.fields.Text.value;
+			const qCloze = this.renderClozeContent(rawText, ord, false);
+			const aCloze = this.renderClozeContent(rawText, ord, true);
+
+			const extraVal = card.fields.Extra?.value ? this.cleanHtmlToMarkdown(card.fields.Extra.value) : undefined;
+			const lectureVal = card.fields['Lecture Notes']?.value ? this.cleanHtmlToMarkdown(card.fields['Lecture Notes'].value) : undefined;
+			const missedVal = card.fields['Missed Questions']?.value ? this.cleanHtmlToMarkdown(card.fields['Missed Questions'].value) : undefined;
+
+			return {
+				question: this.cleanHtmlToMarkdown(qCloze),
+				answer: this.cleanHtmlToMarkdown(aCloze),
+				extra: extraVal || undefined,
+				lectureNotes: lectureVal || undefined,
+				missedQuestions: missedVal || undefined,
+			};
+		}
+
+		// 2. If Basic card with Front and Back fields
+		if (card.fields?.Front?.value && card.fields?.Back?.value) {
+			const extraVal = card.fields.Extra?.value ? this.cleanHtmlToMarkdown(card.fields.Extra.value) : undefined;
+			return {
+				question: this.cleanHtmlToMarkdown(card.fields.Front.value),
+				answer: this.cleanHtmlToMarkdown(card.fields.Back.value),
+				extra: extraVal || undefined,
+			};
+		}
+
+		// 3. Fallback to parsing card.question and card.answer HTML
+		const rawQuestion = card.question || '';
+		let rawAnswer = card.answer || '';
+
+		const answerMarker = /<hr\b[^>]*\bid\s*=\s*["']?answer["']?[^>]*>/i;
+		const marker = rawAnswer.match(answerMarker);
+		if (marker && marker.index !== undefined) {
+			rawAnswer = rawAnswer.slice(marker.index + marker[0].length);
+		}
+
+		return {
+			question: this.cleanHtmlToMarkdown(rawQuestion),
+			answer: this.cleanHtmlToMarkdown(rawAnswer),
+		};
+	}
+
+	private generateCleanTitle(questionText: string, cardId: number, maxLen: number = 0): string {
+		const clean = questionText
+			.replace(/\*\*\[\.\.\.\]\*\*/g, '')
+			.replace(/\[\.\.\.\]/g, '')
+			.replace(/[*_#^[\]()]/g, ' ')
+			.replace(/[\\/:*?"<>|]/g, '')
+			.replace(/\s+/g, ' ')
+			.trim();
+
+		if (!clean) return `Anki Card ${cardId}`;
+		if (maxLen > 0 && clean.length > maxLen) {
+			const slice = clean.slice(0, maxLen);
+			const lastSpace = slice.lastIndexOf(' ');
+			return lastSpace > maxLen / 2 ? slice.slice(0, lastSpace).trim() : slice.trim();
+		}
+		return clean;
+	}
+
+	private generateCleanFileTitle(titleText: string, cardId: number, maxLen: number = 200): string {
+		let clean = titleText
+			.replace(/\*\*\[\.\.\.\]\*\*/g, '[...]')
+			.replace(/[*\\/:?"<>|#^]/g, '')
+			.replace(/\s+/g, ' ')
+			.trim();
+
+		if (!clean) return `Anki Card ${cardId}`;
+		if (maxLen > 0 && clean.length > maxLen) {
+			const slice = clean.slice(0, maxLen);
+			const lastSpace = slice.lastIndexOf(' ');
+			return lastSpace > maxLen / 2 ? slice.slice(0, lastSpace).trim() : slice.trim();
+		}
+		return clean;
+	}
+
+	private showCardContextMenu(evt: MouseEvent, card: AnkiCardInfo) {
+		evt.preventDefault();
+		evt.stopPropagation();
+
+		const menu = new Menu();
+
+		menu.addItem((item) => {
+			item.setTitle(this.isLiveSync ? 'Switch to offline mode' : 'Switch to live sync mode')
+				.setIcon(this.isLiveSync ? 'zap-off' : 'zap')
+				.onClick(() => {
+					if (this.isLiveSync) {
+						this.config.live = false;
+						this.hasStarted = true;
+						void this.loadCards();
+					} else {
+						void this.switchToLiveMode();
+					}
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Back to deck selection')
+				.setIcon('corner-up-left')
+				.onClick(() => {
+					this.resetToDeckPicker();
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Refresh cards from Anki')
+				.setIcon('refresh-cw')
+				.onClick(() => {
+					void this.loadCards();
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Sync with ankiweb')
+				.setIcon('cloud')
+				.onClick(async () => {
+					try {
+						await this.client.sync();
+						new Notice('Anki sync complete');
+					} catch (err: unknown) {
+						const msg = err instanceof Error ? err.message : String(err);
+						new Notice(`Anki sync failed: ${msg}`);
+					}
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Open deck in Anki review')
+				.setIcon('play')
+				.onClick(() => {
+					void this.openDeckInAnki();
+				});
+		});
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('Copy card ID')
+				.setIcon('copy')
+				.onClick(() => {
+					void navigator.clipboard.writeText(String(card.cardId)).then(() => {
+						new Notice(`Copied card ID (${card.cardId}) to clipboard`);
+					});
+				});
+		});
+
+		const rawTitle = card.fields?.Front?.value || card.fields?.Text?.value || card.question || `Card ${card.cardId}`;
+		const plainTitle = this.generateCleanTitle(this.cleanHtmlToMarkdown(rawTitle), card.cardId);
+
+		menu.addItem((item) => {
+			item.setTitle('Copy link to card')
+				.setIcon('link')
+				.onClick(() => {
+					const link = `[Anki: ${plainTitle}](obsidian://anki-card?cardId=${card.cardId})`;
+					void navigator.clipboard.writeText(link).then(() => {
+						new Notice('Copied card link to clipboard');
+					});
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Copy card embed code')
+				.setIcon('code')
+				.onClick(() => {
+					const code = `\`\`\`anki\ncard: ${card.cardId}\n\`\`\``;
+					void navigator.clipboard.writeText(code).then(() => {
+						new Notice('Copied card embed codeblock to clipboard');
+					});
+				});
+		});
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('Append card to daily or target note')
+				.setIcon('file-text')
+				.onClick(() => {
+					void this.appendCardToNote(card);
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Create Obsidian note from card')
+				.setIcon('file-plus')
+				.onClick(() => {
+					void this.createNoteFromCard(card);
+				});
+		});
+
+		const shouldShowLinks = this.config.links ?? this.settings.enableCardLinks;
+		if (shouldShowLinks) {
+			menu.addItem((item) => {
+				item.setTitle('Linked notes and backlinks')
+					.setIcon('link')
+					.onClick(() => {
+						const btn = this.container.querySelector<HTMLElement>('.anki-embed-links-btn');
+						this.openCardLinksDropdown(btn ?? this.container, card);
+					});
+			});
+		}
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('Undo last review')
+				.setIcon('undo')
+				.onClick(() => {
+					void this.undoLastCard();
+				});
+		});
+
+		menu.addItem((item) => {
+			const isFlagged = (card.flags ?? 0) > 0;
+			const flagConfig = isFlagged ? ANKI_FLAG_CONFIGS[card.flags ?? 0] : null;
+			item.setTitle(isFlagged ? `Remove flag (${flagConfig?.name.toLowerCase() ?? ''})` : 'Flag card')
+				.setIcon('flag')
+				.onClick(() => {
+					void this.toggleFlagCurrentCard();
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Card flags and colors')
+				.setIcon('flag')
+				.onClick((e) => {
+					this.showFlagColorMenu(e as MouseEvent, card);
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Suspend card')
+				.setIcon('pause')
+				.onClick(() => {
+					void this.suspendCurrentCard();
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Bury card')
+				.setIcon('archive')
+				.onClick(() => {
+					void this.buryCurrentCard();
+				});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle('Customize remote controls')
+				.setIcon('sliders')
+				.onClick(() => {
+					if (this.app) {
+						new AnkiRemoteConfigModal(this.app, {
+							settings: this.settings,
+							saveData: async (updated) => {
+								this.settings = updated;
+								if (this.saveSettings) {
+									await this.saveSettings(updated);
+								}
+							},
+						}).open();
+					}
+				});
+		});
+
+		menu.addSeparator();
+
+		menu.addItem((item) => {
+			item.setTitle('Open card in Anki desktop browser')
+				.setIcon('external-link')
+				.onClick(() => {
+					void this.client.guiBrowse(`cid:${card.cardId}`);
+				});
+		});
+
+		menu.showAtMouseEvent(evt);
+	}
+
+	private async createNoteFromCard(card: AnkiCardInfo): Promise<void> {
+		if (!this.app) {
+			new Notice('Cannot create note: Obsidian app reference not available.');
+			return;
+		}
+
+		try {
+			const content = this.extractCardContent(card);
+			const isCloze = isClozeCard(card);
+			const title = isCloze
+				? formatClozeTitle(content.question, { card, placeholder: '**[...]**' })
+				: this.generateCleanTitle(content.question, card.cardId);
+			const fileTitle = this.generateCleanFileTitle(title, card.cardId, 200);
+
+			const folderSetting = (this.settings.cardExportFolder || '').trim().replace(/^\/+|\/+$/g, '');
+			let folderPrefix = '';
+			if (folderSetting) {
+				folderPrefix = `${folderSetting}/`;
+				const parts = folderSetting.split('/');
+				let currentPath = '';
+				for (const part of parts) {
+					currentPath = currentPath ? `${currentPath}/${part}` : part;
+					if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+						await this.app.vault.createFolder(currentPath);
+					}
+				}
+			}
+
+			let filename = `${folderPrefix}${fileTitle}.md`;
+			let counter = 1;
+			while (this.app.vault.getAbstractFileByPath(filename)) {
+				filename = `${folderPrefix}${fileTitle} (${counter}).md`;
+				counter++;
+			}
+
+			const deckName = card.deckName || this.config.deck || 'Anki';
+			const tags = this.extractTagsFromCard(card);
+
+			let answerBody = content.answer;
+			if (content.extra) {
+				answerBody += `\n\n> [!info] Extra\n> ${content.extra.split('\n').join('\n> ')}`;
+			}
+			if (content.lectureNotes) {
+				answerBody += `\n\n> [!note] Lecture Notes\n> ${content.lectureNotes.split('\n').join('\n> ')}`;
+			}
+			if (content.missedQuestions) {
+				answerBody += `\n\n> [!warning] Missed Questions\n> ${content.missedQuestions.split('\n').join('\n> ')}`;
+			}
+
+			let tagsSection = '';
+			if (tags.length > 0) {
+				tagsSection = `\n---\n\n## Tags\n${tags.map(t => `- \`${t}\``).join('\n')}\n`;
+			}
+
+			const shouldAutoLink = this.settings.autoLinkExportedCard ?? true;
+			const ankiCardsBlock = shouldAutoLink
+				? `linked-cards:\n  - "${card.cardId}"\nanki-card-id: "${card.cardId}"\nanki-note-id: ${card.note ?? ''}`
+				: `anki-note-id: ${card.note ?? ''}`;
+
+			const noteContent = `---
+${ankiCardsBlock}
+deck: "${deckName}"
+tags:
+  - anki
+---
+
+# ${title}
+
+## Question
+${content.question}
+
+## Answer
+${answerBody}
+
+## Personal Notes
+
+
+---
+
+## Card Details
+- **Deck**: ${deckName}
+- **Card ID**: \`${card.cardId}\`
+- [▶️ Review this card in Anki Embed](obsidian://anki-card?cardId=${card.cardId})
+
+\`\`\`anki
+card: ${card.cardId}
+\`\`\`
+${tagsSection}`;
+
+			const file = await this.app.vault.create(filename, noteContent);
+			new Notice(`Created note: ${file.basename}`);
+			if (shouldAutoLink) {
+				await this.linkNoteToCard(file, card.cardId);
+			}
+
+			const leaf = this.app.workspace.getLeaf('tab');
+			await leaf.openFile(file);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to create note: ${msg}`);
+		}
+	}
+
+	private async appendCardToNote(card: AnkiCardInfo): Promise<void> {
+		if (!this.app) {
+			new Notice('Cannot append card: Obsidian app reference not available.');
+			return;
+		}
+
+		try {
+			const content = this.extractCardContent(card);
+			const title = this.generateCleanTitle(content.question, card.cardId);
+
+			let targetPath = '';
+			const appendTarget = this.settings.cardAppendTarget ?? 'daily';
+
+			if (appendTarget === 'daily') {
+				const internalPlugins = (this.app as unknown as { internalPlugins?: { plugins?: Record<string, { instance?: { options?: { format?: string; folder?: string } } }> } }).internalPlugins;
+				const dailyNotesPlugin = internalPlugins?.plugins?.['daily-notes'];
+				const dailyOptions = dailyNotesPlugin?.instance?.options;
+				const momentFn = (window as unknown as { moment?: (date?: Date) => { format: (fmt: string) => string } }).moment;
+				let dateStr = '';
+				if (typeof momentFn === 'function') {
+					dateStr = momentFn().format(dailyOptions?.format || 'YYYY-MM-DD');
+				} else {
+					const now = new Date();
+					const y = now.getFullYear();
+					const m = String(now.getMonth() + 1).padStart(2, '0');
+					const d = String(now.getDate()).padStart(2, '0');
+					dateStr = `${y}-${m}-${d}`;
+				}
+				const folder = (dailyOptions?.folder || '').trim().replace(/\/+$/, '');
+				targetPath = folder ? `${folder}/${dateStr}.md` : `${dateStr}.md`;
+			} else {
+				targetPath = (this.settings.cardAppendCustomPath || 'Anki Notes.md').trim();
+				if (!targetPath.endsWith('.md')) {
+					targetPath += '.md';
+				}
+			}
+
+			// Clean, single collapsible callout with question for the title and the answer underneath
+			const cleanQuestionTitle = content.question.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim() || title;
+			const answerLines = content.answer.trim().split('\n').map((l) => `> ${l}`).join('\n');
+			const shouldAutoLink = this.settings.autoLinkExportedCard ?? true;
+			const cardSnippet = `> [!question]- ${cleanQuestionTitle}\n${answerLines}\n> [Anki Card](obsidian://anki-card?cardId=${card.cardId})\n`;
+
+			const heading = (this.settings.cardAppendHeading || '## Anki Reviews').trim();
+
+			const targetFile = this.app.vault.getAbstractFileByPath(targetPath);
+			if (!targetFile) {
+				const lastSlash = targetPath.lastIndexOf('/');
+				if (lastSlash > 0) {
+					const folderPath = targetPath.slice(0, lastSlash);
+					if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+						await this.app.vault.createFolder(folderPath);
+					}
+				}
+				const initialContent = heading ? `${heading}\n\n${cardSnippet}\n` : `${cardSnippet}\n`;
+				const created = await this.app.vault.create(targetPath, initialContent);
+				if (shouldAutoLink && created instanceof TFile) {
+					await this.linkNoteToCard(created, card.cardId);
+				}
+				new Notice(`Appended card to ${targetPath}`);
+				return;
+			}
+
+			if (targetFile instanceof TFile) {
+				const existingContent = await this.app.vault.read(targetFile);
+				let newContent = '';
+
+				if (heading && existingContent.includes(heading)) {
+					const headingIdx = existingContent.indexOf(heading);
+					const afterHeading = headingIdx + heading.length;
+					newContent = existingContent.slice(0, afterHeading) + '\n\n' + cardSnippet + existingContent.slice(afterHeading);
+				} else if (heading) {
+					newContent = existingContent.trimEnd() + '\n\n' + heading + '\n\n' + cardSnippet + '\n';
+				} else {
+					newContent = existingContent.trimEnd() + '\n\n' + cardSnippet + '\n';
+				}
+
+				await this.app.vault.modify(targetFile, newContent);
+				if (shouldAutoLink) {
+					await this.linkNoteToCard(targetFile, card.cardId);
+				}
+				new Notice(`Appended card to ${targetFile.basename}`);
+			}
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to append card: ${msg}`);
+		}
+	}
+
+	public findLinkedNotes(cardId: number, skipFullVaultScan = false): CardLinkedNotes<TFile> {
+		const cached = this.linkedNotesCache.get(cardId);
+		if (cached && !skipFullVaultScan) {
+			return cached;
+		}
+
+		const explicit: TFile[] = [];
+		const backlinks: TFile[] = [];
+		const tagLinks: CardTagLink<TFile>[] = [];
+		if (!this.app) return { explicit, backlinks, tagLinks };
+
+		const cardIdStr = String(cardId);
+		const seenPaths = new Set<string>();
+
+		// 1. Explicit links stored in settings.cardLinks (instant O(1))
+		const explicitPaths = this.settings.cardLinks?.[cardIdStr] ?? [];
+		const validExplicitPaths: string[] = [];
+		for (const path of explicitPaths) {
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (file instanceof TFile) {
+				const cache = this.app.metadataCache.getFileCache(file);
+				// If note has frontmatter properties but card was removed, prune from settings
+				if (cache?.frontmatter && !checkFrontmatterForCardId(cache.frontmatter, cardIdStr)) {
+					continue;
+				}
+				explicit.push(file);
+				seenPaths.add(file.path);
+				validExplicitPaths.push(path);
+			}
+		}
+		if (validExplicitPaths.length !== explicitPaths.length && this.settings.cardLinks) {
+			if (validExplicitPaths.length > 0) {
+				this.settings.cardLinks[cardIdStr] = validExplicitPaths;
+			} else {
+				delete this.settings.cardLinks[cardIdStr];
+			}
+			if (this.saveSettings) {
+				void this.saveSettings(this.settings);
+			}
+		}
+
+		// 2. Fast check of metadataCache frontmatter & tags
+		const files = this.app.vault.getMarkdownFiles();
+		const shouldScanBacklinks = (this.config.backlinks ?? this.settings.enableBacklinks) && (this.config.links ?? this.settings.enableCardLinks);
+		const shouldScanTagLinks = (this.config.tagLinks ?? this.settings.enableTagLinks) && (this.config.links ?? this.settings.enableCardLinks);
+		const targetUri1 = `cardId=${cardIdStr}`;
+		const targetUri2 = `card=${cardIdStr}`;
+		const targetCid = `cid:${cardIdStr}`;
+
+		const card = this.cards.find((c) => c.cardId === cardId);
+		const cardTags = shouldScanTagLinks ? this.getCardTagsSync(cardId, card) : [];
+
+		for (const file of files) {
+			if (seenPaths.has(file.path)) continue;
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (!cache) continue;
+
+			if (cache.frontmatter) {
+				const fm = cache.frontmatter as Record<string, unknown>;
+				if (checkFrontmatterForCardId(fm, cardIdStr)) {
+					explicit.push(file);
+					seenPaths.add(file.path);
+					continue;
+				}
+			}
+
+			// Tag-based note linking
+			if (shouldScanTagLinks && cardTags.length > 0) {
+				const noteTags = extractAnkiTagsFromNote(cache);
+				const matchedTag = findMatchingAnkiTag(cardTags, noteTags);
+				if (matchedTag) {
+					tagLinks.push({ file, matchedTag });
+					seenPaths.add(file.path);
+					continue;
+				}
+			}
+
+			if (!shouldScanBacklinks) continue;
+
+			// Backlinks check from metadataCache
+			let isBacklink = false;
+			if (cache.links) {
+				for (const l of cache.links) {
+					if (l.link.includes(targetUri1) || l.link.includes(targetUri2) || l.link.includes(targetCid)) {
+						isBacklink = true;
+						break;
+					}
+				}
+			}
+
+			if (!isBacklink && cache.embeds) {
+				for (const e of cache.embeds) {
+					if (e.link.includes(targetUri1) || e.link.includes(targetUri2) || e.link.includes(targetCid)) {
+						isBacklink = true;
+						break;
+					}
+				}
+			}
+
+			if (!isBacklink && cache.frontmatterLinks) {
+				for (const f of cache.frontmatterLinks) {
+					if (f.link.includes(targetUri1) || f.link.includes(targetUri2) || f.link.includes(targetCid)) {
+						isBacklink = true;
+						break;
+					}
+				}
+			}
+
+			if (isBacklink) {
+				backlinks.push(file);
+				seenPaths.add(file.path);
+			}
+		}
+
+		const result: CardLinkedNotes<TFile> = { explicit, backlinks, tagLinks };
+		this.linkedNotesCache.set(cardId, result);
+		return result;
+	}
+
+	public async scanVaultForCard(cardId: number): Promise<CardLinkedNotes<TFile>> {
+		if (!this.app) return { explicit: [], backlinks: [], tagLinks: [] };
+
+		const shouldScanBacklinks = (this.config.backlinks ?? this.settings.enableBacklinks) && (this.config.links ?? this.settings.enableCardLinks);
+		const shouldScanTagLinks = (this.config.tagLinks ?? this.settings.enableTagLinks) && (this.config.links ?? this.settings.enableCardLinks);
+		if (!shouldScanBacklinks && !shouldScanTagLinks) {
+			return this.findLinkedNotes(cardId, true);
+		}
+
+		const card = this.cards.find((c) => c.cardId === cardId);
+		let cardTags: string[] = [];
+		if (shouldScanTagLinks) {
+			cardTags = await this.ensureCardTagsLoaded(cardId, card);
+		}
+
+		// Start with existing cached or fast frontmatter check
+		const initial = this.findLinkedNotes(cardId, true);
+		const explicit: TFile[] = [...initial.explicit];
+		const backlinks: TFile[] = [...initial.backlinks];
+		const tagLinks: CardTagLink<TFile>[] = [...initial.tagLinks];
+		const seenPaths = new Set<string>([
+			...explicit.map((f) => f.path),
+			...backlinks.map((f) => f.path),
+			...tagLinks.map((t) => t.file.path),
+		]);
+
+		const cardIdStr = String(cardId);
+		const files = this.app.vault.getMarkdownFiles();
+		const cardRegex = new RegExp(`(?:^|\\n)\\s*card(?:Id)?:\\s*${cardIdStr}\\b`);
+		const uriRegex = new RegExp(`obsidian:\\/\\/(?:anki-card|anki-embed)\\?[^)\\s]*cardId=${cardIdStr}\\b`);
+
+		for (const file of files) {
+			if (seenPaths.has(file.path)) continue;
+
+			// Check frontmatter first
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (cache?.frontmatter) {
+				const fm = cache.frontmatter as Record<string, unknown>;
+				if (checkFrontmatterForCardId(fm, cardIdStr)) {
+					explicit.push(file);
+					seenPaths.add(file.path);
+					continue;
+				}
+			}
+
+			// Check tags from cache
+			if (shouldScanTagLinks && cardTags.length > 0 && cache) {
+				const noteTags = extractAnkiTagsFromNote(cache);
+				const matchedTag = findMatchingAnkiTag(cardTags, noteTags);
+				if (matchedTag) {
+					tagLinks.push({ file, matchedTag });
+					seenPaths.add(file.path);
+					continue;
+				}
+			}
+
+			// Read note body to discover backlinks (URI scheme, markdown codeblocks, cid references) or inline tags
+			try {
+				const content = await this.app.vault.cachedRead(file);
+
+				// Check tag matches in content
+				if (shouldScanTagLinks && cardTags.length > 0 && (content.includes('anki-tag') || content.includes('#anki'))) {
+					const textTags = extractAnkiTagsFromText(content);
+					const matchedTag = findMatchingAnkiTag(cardTags, textTags);
+					if (matchedTag) {
+						tagLinks.push({ file, matchedTag });
+						seenPaths.add(file.path);
+						continue;
+					}
+				}
+
+				if (shouldScanBacklinks && content.includes(cardIdStr)) {
+					const isTargetMatch =
+						content.includes(`cardId=${cardIdStr}`) ||
+						content.includes(`card=${cardIdStr}`) ||
+						content.includes(`cid:${cardIdStr}`) ||
+						content.includes(`cid=${cardIdStr}`) ||
+						cardRegex.test(content) ||
+						uriRegex.test(content);
+
+					if (isTargetMatch) {
+						backlinks.push(file);
+						seenPaths.add(file.path);
+					}
+				}
+			} catch {
+				// Ignore read error
+			}
+		}
+
+		const result: CardLinkedNotes<TFile> = { explicit, backlinks, tagLinks };
+		this.linkedNotesCache.set(cardId, result);
+		return result;
+	}
+
+	public async linkNoteToCard(file: TFile, cardId: number): Promise<void> {
+		this.linkedNotesCache.delete(cardId);
+		await linkCardToNote(this.app, file, cardId, this.settings, this.saveSettings);
+		new Notice(`Linked "${file.basename}" to Anki card`);
+		this.updateLinksButton();
+	}
+
+	public async linkTagToNote(file: TFile, tag: string, cardId?: number): Promise<void> {
+		if (!this.app) return;
+		try {
+			await linkTagToNote(this.app, file, tag);
+			new Notice(`Linked Anki tag "${tag}" to "${file.basename}"`);
+			if (cardId !== undefined) {
+				this.linkedNotesCache.delete(cardId);
+				this.updateLinksButton();
+			} else {
+				this.linkedNotesCache.clear();
+				this.updateLinksButton();
+			}
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Failed to link tag: ${msg}`);
+		}
+	}
+
+	public async unlinkNoteFromCard(file: TFile, cardId: number): Promise<void> {
+		this.linkedNotesCache.delete(cardId);
+		await unlinkCardFromNote(this.app, file, cardId, this.settings, this.saveSettings);
+		new Notice(`Unlinked "${file.basename}" from Anki card`);
+		this.updateLinksButton();
+	}
+
+	public invalidateLinksCache(cardId?: number): void {
+		if (cardId !== undefined) {
+			this.linkedNotesCache.delete(cardId);
+		} else {
+			this.linkedNotesCache.clear();
+		}
+		this.updateLinksButton();
+	}
+
+	public async linkActiveNote(cardId: number): Promise<void> {
+		if (!this.app) return;
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			new Notice('No active note to link.');
+			return;
+		}
+		await this.linkNoteToCard(activeFile, cardId);
+	}
+
+	public async unlinkActiveNote(cardId: number): Promise<void> {
+		if (!this.app) return;
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			new Notice('No active note to unlink.');
+			return;
+		}
+		await this.unlinkNoteFromCard(activeFile, cardId);
+	}
+
+	private renderLinksButton(container: HTMLElement, card: AnkiCardInfo): HTMLElement {
+		const btn = container.createDiv({ cls: 'anki-embed-links-btn is-empty' });
+		const cardId = card.cardId;
+		const cached = this.linkedNotesCache.get(cardId);
+
+		const applyCount = (total: number, explicitCount: number, backlinkCount: number, tagLinkCount: number) => {
+			btn.empty();
+			if (total > 0) {
+				btn.removeClass('is-empty');
+				btn.addClass('is-linked');
+				btn.createSpan({ text: '🔗' });
+				btn.createSpan({ text: String(total) });
+				const parts: string[] = [];
+				if (explicitCount > 0) parts.push(`${explicitCount} linked`);
+				if (tagLinkCount > 0) parts.push(`${tagLinkCount} tagged`);
+				if (backlinkCount > 0) parts.push(`${backlinkCount} backlink(s)`);
+				btn.setAttribute('title', `${parts.join(', ')} (click to view)`);
+			} else {
+				btn.removeClass('is-linked');
+				btn.addClass('is-empty');
+				btn.createSpan({ text: '🔗' });
+				btn.createSpan({ text: '0' });
+				btn.setAttribute('title', 'No linked notes (click to link note)');
+			}
+		};
+
+		if (cached) {
+			const total = cached.explicit.length + cached.backlinks.length + cached.tagLinks.length;
+			applyCount(total, cached.explicit.length, cached.backlinks.length, cached.tagLinks.length);
+		} else {
+			// Fast path: instant frontmatter + settings.cardLinks + fast metadata tags (0ms)
+			const fast = this.findLinkedNotes(cardId, true);
+			const quickTotal = fast.explicit.length + fast.backlinks.length + fast.tagLinks.length;
+			applyCount(quickTotal, fast.explicit.length, fast.backlinks.length, fast.tagLinks.length);
+
+			// Background ensure card tags loaded if not yet present + vault scan
+			window.setTimeout(() => {
+				if (!this.container.isConnected) return;
+				void this.ensureCardTagsLoaded(cardId, card).then(() => {
+					void this.scanVaultForCard(cardId).then((res) => {
+						const newTotal = res.explicit.length + res.backlinks.length + res.tagLinks.length;
+						if (newTotal !== quickTotal) {
+							this.updateLinksButton();
+						}
+					});
+				});
+			}, 40);
+		}
+
+		btn.onclick = (evt: MouseEvent) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const activeCard = this.cards[this.currentIndex] || card;
+			if (activeCard) {
+				this.openCardLinksDropdown(btn, activeCard);
+			}
+		};
+
+		return btn;
+	}
+
+	private updateLinksButton(): void {
+		this.updateFullscreenTopPillLinks();
+		const btn = this.container.querySelector<HTMLElement>('.anki-embed-links-btn');
+		const currentCard = this.cards[this.currentIndex];
+		if (!btn || !currentCard) return;
+
+		const { explicit, backlinks, tagLinks } = this.findLinkedNotes(currentCard.cardId);
+		const total = explicit.length + backlinks.length + tagLinks.length;
+
+		btn.onclick = (evt: MouseEvent) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const activeCard = this.cards[this.currentIndex] || currentCard;
+			if (activeCard) {
+				this.openCardLinksDropdown(btn, activeCard);
+			}
+		};
+
+		btn.empty();
+		if (total > 0) {
+			btn.removeClass('is-empty');
+			btn.addClass('is-linked');
+			btn.createSpan({ text: '🔗' });
+			btn.createSpan({ text: String(total) });
+			const parts: string[] = [];
+			if (explicit.length > 0) parts.push(`${explicit.length} linked`);
+			if (tagLinks.length > 0) parts.push(`${tagLinks.length} tagged`);
+			if (backlinks.length > 0) parts.push(`${backlinks.length} backlink(s)`);
+			btn.setAttribute('title', `${parts.join(', ')} (click to view)`);
+		} else {
+			btn.removeClass('is-linked');
+			btn.addClass('is-empty');
+			btn.createSpan({ text: '🔗' });
+			btn.createSpan({ text: '0' });
+			btn.setAttribute('title', 'No linked notes (click to link note)');
+		}
+	}
+
+	private updateFullscreenTopPillLinks(): void {
+		const indicator = this.container.querySelector<HTMLElement>('.anki-fs-links-indicator');
+		if (!indicator) return;
+
+		const currentCard = this.cards[this.currentIndex];
+		if (!currentCard) {
+			indicator.setCssStyles({ display: 'none' });
+			return;
+		}
+
+		const { explicit, backlinks, tagLinks } = this.findLinkedNotes(currentCard.cardId, true);
+		const total = explicit.length + backlinks.length + tagLinks.length;
+		if (total > 0) {
+			indicator.setCssStyles({ display: '' });
+			indicator.setText('Links');
+			indicator.setAttribute('title', `${total} linked note(s) for this card (click to view)`);
+		} else {
+			indicator.setCssStyles({ display: 'none' });
+		}
+	}
+
+	public closeActiveLinksDropdown = (): void => {
+		this.refreshActiveLinksDropdown = null;
+		if (this.activeLinksDropdown) {
+			this.activeLinksDropdown.remove();
+			this.activeLinksDropdown = null;
+		}
+		if (this.linksDropdownCleanup) {
+			this.linksDropdownCleanup();
+			this.linksDropdownCleanup = null;
+		}
+	};
+
+	private async openFullscreenSideNote(file: TFile): Promise<void> {
+		this.activeSideNoteFile = file;
+		this.container.addClass('has-side-note');
+
+		const existing = this.container.querySelector<HTMLElement>('.anki-fs-side-note');
+		if (existing) {
+			existing.remove();
+		}
+		if (this.activeSideNoteComponent) {
+			this.activeSideNoteComponent.unload();
+			this.activeSideNoteComponent = null;
+		}
+
+		const sideNoteEl = this.container.createDiv({ cls: 'anki-fs-side-note' });
+		const footerHeight = this.footerEl?.offsetHeight || 64;
+		sideNoteEl.setCssStyles({ bottom: `${footerHeight}px` });
+
+		const header = sideNoteEl.createDiv({ cls: 'anki-fs-side-note-header' });
+		const titleBox = header.createDiv({ cls: 'anki-fs-side-note-title-box' });
+		titleBox.createSpan({ cls: 'anki-fs-side-note-icon', text: '📄' });
+		titleBox.createSpan({ cls: 'anki-fs-side-note-title', text: file.basename });
+		if (file.parent && file.parent.path !== '/') {
+			titleBox.createSpan({ cls: 'anki-fs-side-note-path', text: file.parent.path });
+		}
+
+		const actions = header.createDiv({ cls: 'anki-fs-side-note-actions' });
+		const openTabBtn = actions.createEl('button', {
+			cls: 'anki-fs-side-note-btn',
+			text: 'Open in tab ↗',
+			attr: { title: `Open "${file.basename}" in Obsidian tab` },
+		});
+		openTabBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.closeFullscreenSideNote();
+			this.toggleAnkiFullscreen(false);
+			const leaf = this.app?.workspace.getLeaf('tab') || this.app?.workspace.getLeaf();
+			if (leaf) {
+				void leaf.openFile(file).then(() => {
+					this.app?.workspace.setActiveLeaf(leaf, { focus: true });
+				});
+			}
+		};
+
+		const closeBtn = actions.createEl('button', {
+			cls: 'anki-fs-side-note-btn anki-fs-side-note-close',
+			text: '✕',
+			attr: { title: 'Close side note (esc)' },
+		});
+		closeBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.closeFullscreenSideNote();
+		};
+
+		const contentEl = sideNoteEl.createDiv({ cls: 'anki-fs-side-note-content' });
+		if (this.app) {
+			try {
+				const content = await this.app.vault.read(file);
+				const comp = new Component();
+				comp.load();
+				this.activeSideNoteComponent = comp;
+				await MarkdownRenderer.render(this.app, content, contentEl, file.path, comp);
+			} catch (err: unknown) {
+				const errorMsg = err instanceof Error ? err.message : String(err);
+				contentEl.createDiv({ cls: 'anki-fs-side-note-error', text: `Failed to load note: ${errorMsg}` });
+			}
+		}
+	}
+
+	private closeFullscreenSideNote(): void {
+		this.activeSideNoteFile = null;
+		this.container.removeClass('has-side-note');
+		const existing = this.container.querySelector<HTMLElement>('.anki-fs-side-note');
+		if (existing) {
+			existing.remove();
+		}
+		if (this.activeSideNoteComponent) {
+			this.activeSideNoteComponent.unload();
+			this.activeSideNoteComponent = null;
+		}
+	}
+
+	private openCardLinksDropdown(anchorBtn: HTMLElement, card?: AnkiCardInfo): void {
+		if (this.activeLinksDropdown) {
+			this.closeActiveLinksDropdown();
+			return;
+		}
+
+		const activeCard = this.cards[this.currentIndex] || card;
+		if (!activeCard) return;
+
+		const targetParent = this.isAnkiFullscreen ? this.container : document.body;
+		const dropdown = targetParent.createDiv({ cls: 'anki-links-dropdown' });
+		this.activeLinksDropdown = dropdown;
+
+		const updateDropdownPosition = () => {
+			const rect = anchorBtn.getBoundingClientRect();
+			const dropdownWidth = Math.min(440, window.innerWidth - 24);
+			let left = rect.left;
+			if (left + dropdownWidth > window.innerWidth - 12) {
+				left = Math.max(12, window.innerWidth - dropdownWidth - 12);
+			}
+			if (left < 12) {
+				left = 12;
+			}
+
+			const spaceBelow = window.innerHeight - rect.bottom;
+			const spaceAbove = rect.top;
+
+			// If space below is constrained (< 420px) and there's more room above, open upwards
+			if (spaceBelow < 420 && spaceAbove > spaceBelow) {
+				const bottomGap = Math.max(12, window.innerHeight - rect.top + 8);
+				dropdown.setCssStyles({
+					left: `${left}px`,
+					bottom: `${bottomGap}px`,
+					top: 'auto',
+					maxHeight: `${Math.max(180, Math.min(540, spaceAbove - 24))}px`,
+				});
+			} else {
+				const topGap = rect.bottom + 6;
+				dropdown.setCssStyles({
+					left: `${left}px`,
+					top: `${topGap}px`,
+					bottom: 'auto',
+					maxHeight: `${Math.max(180, Math.min(540, spaceBelow - 24))}px`,
+				});
+			}
+		};
+		updateDropdownPosition();
+
+		const openNote = (file: TFile) => {
+			this.closeActiveLinksDropdown();
+			if (this.isAnkiFullscreen) {
+				this.toggleAnkiFullscreen(false);
+			}
+			const leaf = this.app?.workspace.getLeaf('tab') || this.app?.workspace.getLeaf();
+			if (leaf) {
+				void leaf.openFile(file).then(() => {
+					this.app?.workspace.setActiveLeaf(leaf, { focus: true });
+				});
+			}
+		};
+
+		const openNoteSideBySide = async (file: TFile) => {
+			this.closeActiveLinksDropdown();
+			if (this.isAnkiFullscreen) {
+				await this.openFullscreenSideNote(file);
+			} else {
+				const leaf = this.app?.workspace.getLeaf('split', 'vertical');
+				if (leaf) {
+					await leaf.openFile(file);
+					this.app?.workspace.setActiveLeaf(leaf, { focus: true });
+				}
+			}
+		};
+
+		const renderDropdownContent = () => {
+			dropdown.empty();
+
+			const currentActive = this.cards[this.currentIndex] || activeCard;
+			const { explicit, backlinks, tagLinks } = this.findLinkedNotes(currentActive.cardId);
+			const total = explicit.length + backlinks.length + tagLinks.length;
+
+			// Header
+			const header = dropdown.createDiv({ cls: 'anki-links-dropdown-header' });
+			const titleBox = header.createDiv({ cls: 'anki-links-dropdown-title' });
+			titleBox.createSpan({ text: '🔗' });
+			titleBox.createSpan({ text: 'Linked Notes', cls: 'anki-links-title-text' });
+			titleBox.createSpan({ cls: 'anki-links-count-badge', text: String(total) });
+
+			const closeBtn = header.createEl('button', {
+				cls: 'anki-links-close-btn',
+				text: '✕',
+				attr: { title: 'Close menu' },
+			});
+			closeBtn.onclick = (e) => {
+				e.stopPropagation();
+				this.closeActiveLinksDropdown();
+			};
+
+			const body = dropdown.createDiv({ cls: 'anki-links-dropdown-body' });
+
+			// Show card's Anki tags if present (with 1-click copy or link to active note!)
+			const cardTags = this.getCardTagsSync(currentActive.cardId, currentActive);
+			if (cardTags.length > 0) {
+				const tagsContainer = body.createDiv({ cls: 'anki-links-card-tags' });
+				const tagsHeader = tagsContainer.createDiv({ cls: 'anki-links-card-tags-header' });
+				const chevron = tagsHeader.createSpan({ cls: 'anki-links-tags-chevron', text: '▸' });
+				tagsHeader.createSpan({ cls: 'anki-links-card-tags-label', text: `Card tags (${cardTags.length})` });
+
+				const tagsList = tagsContainer.createDiv({ cls: 'anki-links-card-tags-list is-collapsed' });
+				tagsHeader.onclick = (e) => {
+					e.stopPropagation();
+					const isCollapsed = tagsList.hasClass('is-collapsed');
+					if (isCollapsed) {
+						tagsList.removeClass('is-collapsed');
+						chevron.setText('▾');
+					} else {
+						tagsList.addClass('is-collapsed');
+						chevron.setText('▸');
+					}
+					updateDropdownPosition();
+				};
+
+				const activeNote = this.app?.workspace.getActiveFile();
+				for (const tag of cardTags) {
+					const pill = tagsList.createSpan({ cls: 'anki-links-card-tag-pill', text: tag });
+					if (activeNote) {
+						pill.setAttribute('title', `Click to link "${tag}" to active note "${activeNote.basename}"`);
+					} else {
+						pill.setAttribute('title', `Click to copy "anki-tags: [${tag}]" for your note`);
+					}
+					pill.onclick = async (e) => {
+						e.stopPropagation();
+						const currentNote = this.app?.workspace.getActiveFile();
+						if (currentNote) {
+							await this.linkTagToNote(currentNote, tag, currentActive.cardId);
+							renderDropdownContent();
+						} else {
+							void navigator.clipboard.writeText(`anki-tags: ["${tag}"]`).then(() => {
+								new Notice(`Copied "anki-tags: ["${tag}"]" to clipboard`);
+							});
+						}
+					};
+				}
+			}
+
+			// If no links at all
+			if (total === 0) {
+				const emptyBox = body.createDiv({ cls: 'anki-links-empty' });
+				emptyBox.setText('No linked notes or backlinks for this card yet.');
+			}
+
+			// 1. Explicitly linked notes section
+			if (explicit.length > 0) {
+				const explicitHeader = body.createDiv({ cls: 'anki-links-section-header' });
+				explicitHeader.setText(`Directly Linked Notes (${explicit.length})`);
+
+				const explicitList = body.createDiv({ cls: 'anki-links-list' });
+				for (const file of explicit) {
+					const row = explicitList.createDiv({
+						cls: 'anki-links-row',
+						attr: { title: `Click to open "${file.basename}"` },
+					});
+					const contentBox = row.createDiv({ cls: 'anki-links-row-content' });
+					contentBox.createSpan({ cls: 'anki-links-file-icon', text: '📄' });
+
+					const textBox = contentBox.createDiv({ cls: 'anki-links-text-block' });
+					textBox.createSpan({ cls: 'anki-links-file-title', text: file.basename });
+					const folder = file.parent ? file.parent.path : '';
+					if (folder && folder !== '/') {
+						textBox.createSpan({ cls: 'anki-links-file-path', text: folder });
+					}
+
+					const actionGroup = row.createDiv({ cls: 'anki-links-row-actions' });
+					const sideBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn anki-links-side-btn',
+						text: 'Side by side ◫',
+						attr: { title: `Open "${file.basename}" side by side with review` },
+					});
+					sideBtn.onclick = (e) => {
+						e.stopPropagation();
+						void openNoteSideBySide(file);
+					};
+
+					const openBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn',
+						text: 'Open ↗',
+						attr: { title: `Open "${file.basename}"` },
+					});
+					openBtn.onclick = (e) => {
+						e.stopPropagation();
+						openNote(file);
+					};
+
+					const unlinkBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-unlink-btn',
+						text: '✕',
+						attr: { title: `Unlink "${file.basename}"` },
+					});
+					unlinkBtn.onclick = async (e) => {
+						e.stopPropagation();
+						await this.unlinkNoteFromCard(file, currentActive.cardId);
+						renderDropdownContent();
+					};
+
+					row.onclick = () => openNote(file);
+				}
+			}
+
+			// 2. Tagged notes section
+			const shouldShowTagLinks = (this.config.tagLinks ?? this.settings.enableTagLinks) && (this.config.links ?? this.settings.enableCardLinks);
+			if (shouldShowTagLinks && tagLinks.length > 0) {
+				const tagHeader = body.createDiv({ cls: 'anki-links-section-header' });
+				tagHeader.setText(`Tagged Notes (${tagLinks.length})`);
+
+				const tagList = body.createDiv({ cls: 'anki-links-list' });
+				for (const item of tagLinks) {
+					const file = item.file;
+					const row = tagList.createDiv({
+						cls: 'anki-links-row is-tag-link',
+						attr: { title: `Click to open "${file.basename}" (matched tag: ${item.matchedTag})` },
+					});
+					const contentBox = row.createDiv({ cls: 'anki-links-row-content' });
+					contentBox.createSpan({ cls: 'anki-links-file-icon', text: '🏷️' });
+
+					const textBox = contentBox.createDiv({ cls: 'anki-links-text-block' });
+					textBox.createSpan({ cls: 'anki-links-file-title', text: file.basename });
+					const metaRow = textBox.createDiv({ cls: 'anki-links-meta-row' });
+					metaRow.createSpan({ cls: 'anki-links-tag-badge', text: item.matchedTag });
+					const folder = file.parent ? file.parent.path : '';
+					if (folder && folder !== '/') {
+						metaRow.createSpan({ cls: 'anki-links-file-path', text: folder });
+					}
+
+					const actionGroup = row.createDiv({ cls: 'anki-links-row-actions' });
+					const sideBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn anki-links-side-btn',
+						text: 'Side by side ◫',
+						attr: { title: `Open "${file.basename}" side by side with review` },
+					});
+					sideBtn.onclick = (e) => {
+						e.stopPropagation();
+						void openNoteSideBySide(file);
+					};
+
+					const openBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn',
+						text: 'Open ↗',
+						attr: { title: `Open "${file.basename}"` },
+					});
+					openBtn.onclick = (e) => {
+						e.stopPropagation();
+						openNote(file);
+					};
+
+					row.onclick = () => openNote(file);
+				}
+			}
+
+			// 3. Backlinks section
+			const shouldShowBacklinks = (this.config.backlinks ?? this.settings.enableBacklinks) && (this.config.links ?? this.settings.enableCardLinks);
+			if (shouldShowBacklinks && backlinks.length > 0) {
+				const backlinkHeader = body.createDiv({ cls: 'anki-links-section-header' });
+				backlinkHeader.setText(`Backlinks in Vault (${backlinks.length})`);
+
+				const backlinkList = body.createDiv({ cls: 'anki-links-list' });
+				for (const file of backlinks) {
+					const row = backlinkList.createDiv({
+						cls: 'anki-links-row is-backlink',
+						attr: { title: `Click to open "${file.basename}"` },
+					});
+					const contentBox = row.createDiv({ cls: 'anki-links-row-content' });
+					contentBox.createSpan({ cls: 'anki-links-file-icon', text: '🔗' });
+
+					const textBox = contentBox.createDiv({ cls: 'anki-links-text-block' });
+					textBox.createSpan({ cls: 'anki-links-file-title', text: file.basename });
+					const metaRow = textBox.createDiv({ cls: 'anki-links-meta-row' });
+					metaRow.createSpan({ cls: 'anki-links-mention-badge', text: 'mention' });
+					const folder = file.parent ? file.parent.path : '';
+					if (folder && folder !== '/') {
+						metaRow.createSpan({ cls: 'anki-links-file-path', text: folder });
+					}
+
+					const actionGroup = row.createDiv({ cls: 'anki-links-row-actions' });
+					const sideBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn anki-links-side-btn',
+						text: 'Side by side ◫',
+						attr: { title: `Open "${file.basename}" side by side with review` },
+					});
+					sideBtn.onclick = (e) => {
+						e.stopPropagation();
+						void openNoteSideBySide(file);
+					};
+
+					const openBtn = actionGroup.createEl('button', {
+						cls: 'anki-links-open-btn',
+						text: 'Open ↗',
+						attr: { title: `Open "${file.basename}"` },
+					});
+					openBtn.onclick = (e) => {
+						e.stopPropagation();
+						openNote(file);
+					};
+
+					row.onclick = () => openNote(file);
+				}
+			}
+
+			body.createDiv({ cls: 'anki-links-divider' });
+
+			// 4. Quick Actions
+			const actions = body.createDiv({ cls: 'anki-links-actions' });
+
+			const activeFile = this.app?.workspace.getActiveFile();
+			if (activeFile) {
+				const isAlreadyLinked = explicit.some((f) => f.path === activeFile.path);
+				const linkActiveBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
+				linkActiveBtn.createSpan({ cls: 'anki-links-action-icon', text: isAlreadyLinked ? '➖' : '➕' });
+				linkActiveBtn.createSpan({
+					cls: 'anki-links-action-label',
+					text: isAlreadyLinked ? `Unlink active (${activeFile.basename})` : `Link active note (${activeFile.basename})`,
+				});
+				linkActiveBtn.onclick = async () => {
+					if (isAlreadyLinked) {
+						await this.unlinkNoteFromCard(activeFile, currentActive.cardId);
+					} else {
+						await this.linkNoteToCard(activeFile, currentActive.cardId);
+					}
+					renderDropdownContent();
+				};
+			}
+
+			const searchBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
+			searchBtn.createSpan({ cls: 'anki-links-action-icon', text: '🔍' });
+			searchBtn.createSpan({ cls: 'anki-links-action-label', text: 'Search vault to link note...' });
+			searchBtn.onclick = () => {
+				this.closeActiveLinksDropdown();
+				if (this.isAnkiFullscreen) {
+					this.toggleAnkiFullscreen(false);
+				}
+				if (this.app) {
+					new NoteSelectModal(this.app, (file) => {
+						void this.linkNoteToCard(file, currentActive.cardId);
+					}).open();
+				}
+			};
+
+			const searchTagBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
+			searchTagBtn.createSpan({ cls: 'anki-links-action-icon', text: '🏷️' });
+			searchTagBtn.createSpan({ cls: 'anki-links-action-label', text: 'Search Anki tags to link note...' });
+			searchTagBtn.onclick = () => {
+				this.closeActiveLinksDropdown();
+				if (this.isAnkiFullscreen) {
+					this.toggleAnkiFullscreen(false);
+				}
+				const cardTags = this.getCardTagsSync(currentActive.cardId, currentActive);
+				if (this.app) {
+					new TagSelectModal(
+						this.app,
+						this.client,
+						(tag: string) => {
+							const currentNote = this.app?.workspace.getActiveFile();
+							if (currentNote) {
+								void this.linkTagToNote(currentNote, tag, currentActive.cardId);
+							} else {
+								new NoteSelectModal(this.app!, (file) => {
+									void this.linkTagToNote(file, tag, currentActive.cardId);
+								}).open();
+							}
+						},
+						cardTags
+					).open();
+				}
+			};
+
+			const createBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
+			createBtn.createSpan({ cls: 'anki-links-action-icon', text: '📝' });
+			createBtn.createSpan({ cls: 'anki-links-action-label', text: 'Create note from card & link' });
+			createBtn.onclick = () => {
+				this.closeActiveLinksDropdown();
+				void this.createNoteFromCard(currentActive);
+			};
+
+			const copyUriBtn = actions.createEl('button', { cls: 'anki-links-action-btn' });
+			copyUriBtn.createSpan({ cls: 'anki-links-action-icon', text: '📋' });
+			copyUriBtn.createSpan({ cls: 'anki-links-action-label', text: 'Copy link to card' });
+			copyUriBtn.onclick = () => {
+				const rawTitle = currentActive.fields?.Front?.value || currentActive.fields?.Text?.value || currentActive.question || `Card ${currentActive.cardId}`;
+				const plainTitle = this.generateCleanTitle(this.cleanHtmlToMarkdown(rawTitle), currentActive.cardId);
+				const link = `[Anki: ${plainTitle}](obsidian://anki-card?cardId=${currentActive.cardId})`;
+				void navigator.clipboard.writeText(link).then(() => {
+					new Notice('Copied card link to clipboard');
+				});
+				this.closeActiveLinksDropdown();
+			};
+
+			updateDropdownPosition();
+		};
+
+		renderDropdownContent();
+		this.refreshActiveLinksDropdown = () => {
+			if (this.activeLinksDropdown === dropdown) renderDropdownContent();
+		};
+
+		// Trigger vault scan if not done yet to populate backlinks
+		void this.scanVaultForCard(activeCard.cardId).then(() => {
+			if (this.activeLinksDropdown === dropdown) {
+				renderDropdownContent();
+			}
+		});
+
+		const onResize = () => {
+			updateDropdownPosition();
+		};
+		window.addEventListener('resize', onResize);
+
+		// Listeners for outside click and escape
+		const onDocClick = (e: MouseEvent) => {
+			if (dropdown && !dropdown.contains(e.target as Node) && !anchorBtn.contains(e.target as Node)) {
+				this.closeActiveLinksDropdown();
+			}
+		};
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') {
+				this.closeActiveLinksDropdown();
+			}
+		};
+
+		window.setTimeout(() => {
+			document.addEventListener('click', onDocClick);
+			document.addEventListener('keydown', onKeyDown);
+		}, 10);
+
+		this.linksDropdownCleanup = () => {
+			window.removeEventListener('resize', onResize);
+			document.removeEventListener('click', onDocClick);
+			document.removeEventListener('keydown', onKeyDown);
+		};
+	}
+
+	private renderMilestoneScreen(futureCount: number): void {
+		this.container.empty();
+		this.renderHeader(this.config.deck);
+
+		const completedDiv = this.container.createDiv({ cls: 'anki-embed-completed' });
+		completedDiv.createDiv({
+			cls: 'anki-embed-completed-icon',
+			text: '🎉',
+		});
+		completedDiv.createEl('h3', { text: 'All due cards completed!' });
+		completedDiv.createEl('p', {
+			text: `You have completed all due learning, review, and new cards for this session. There are ${futureCount} future review card(s) remaining if you want to review ahead early.`,
+		});
+
+		const actions = completedDiv.createDiv({
+			cls: 'anki-embed-actions',
+			attr: { style: 'margin-top: 16px; justify-content: center; gap: 10px; flex-wrap: wrap;' },
+		});
+		const continueBtn = actions.createEl('button', {
+			cls: 'anki-embed-flip-btn',
+			text: `Continue early reviews (${futureCount} cards)`,
+		});
+		continueBtn.onclick = () => {
+			this.hasAcknowledgedEarlyReviews = true;
+			void this.renderCurrentCard();
+		};
+
+		const finishBtn = actions.createEl('button', {
+			cls: 'anki-embed-btn-secondary',
+			text: 'Finish session',
+		});
+		finishBtn.onclick = () => {
+			this.renderCompleted();
+		};
 	}
 
 	private renderCompleted() {
